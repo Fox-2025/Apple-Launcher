@@ -40,7 +40,7 @@ class MainActivity : Activity() {
     private var returnedFromApp=false
     private var lastOpenedId:String?=null
     private lateinit var homeHeader:View
-    private lateinit var moveBackdrop:View
+    private lateinit var moveBackdrop:ImageView
     private inner class SoftFocusLayout(private val soften:()->Boolean):LinearLayout(this@MainActivity) {
         private var snapshot:Bitmap?=null
         private val paint=android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
@@ -616,6 +616,9 @@ class MainActivity : Activity() {
     }
 
     private fun beginMove(tile: Tile) {
+        val snapshot=runCatching { glassSource.frame()?.bitmap?.let { b -> Bitmap.createScaledBitmap(b,maxOf(1,b.width/3),maxOf(1,b.height/3),true) } }.getOrNull()
+        moveBackdrop.setImageBitmap(snapshot)
+        shelfPlayer.stop(); shelfKey=null
         movingId = tile.id
         moveOrder = tiles().map { it.id }.toMutableList()
         selectedId = tile.id
@@ -631,6 +634,8 @@ class MainActivity : Activity() {
         }
         movingId = null
         moveOrder = null
+        moveBackdrop.setImageDrawable(null)
+        shelfKey=null
         refreshCards()
     }
 
@@ -750,7 +755,7 @@ class MainActivity : Activity() {
         frame.addView(videoSurface,FrameLayout.LayoutParams(-1,-1))
         backdropTint = View(this)
         frame.addView(backdropTint, FrameLayout.LayoutParams(-1, -1))
-        moveBackdrop=View(this).apply { setBackgroundColor(0x20000000); visibility=View.GONE }
+        moveBackdrop=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_XY; setBackgroundColor(0x20000000); setColorFilter(0x18000000,PorterDuff.Mode.SRC_ATOP); visibility=View.GONE }
         frame.addView(moveBackdrop,FrameLayout.LayoutParams(-1,-1))
         glassSource=GlassBackdrop(backdropImage,videoSurface,backdropTint)
         frame.addView(root, FrameLayout.LayoutParams(-1, -1))
@@ -1013,6 +1018,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateShelf(tile: Tile?) {
+        if(movingId!=null) return
         val newKey=tile?.id?.takeIf { id -> tiles().take(columns).any { it.id==id } && !id.startsWith("hdmi:") && !id.startsWith("builtin:") }
         if(shelfKey==newKey && newKey!=null && shelfPlayer.available) return
         shelfKey=newKey
