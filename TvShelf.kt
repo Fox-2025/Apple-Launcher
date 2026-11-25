@@ -17,7 +17,7 @@ import java.util.concurrent.Executors
 internal class TvShelf(private val context: Context, private val texture: TextureView,
     private val onItem: (Item?, Bitmap?) -> Unit) {
     data class Item(val title: String, val description: String, val image: Uri?, val video: Uri?,
-        val channelLogo:Boolean=false, val fallbackLogo:Uri?=null, val catalogLogo:Uri?=null)
+        val channelLogo:Boolean=false, val fallbackLogo:Uri?=null, val catalogLogo:Uri?=null, val link:Uri?=null)
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var generation = 0
@@ -183,6 +183,79 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         return best
     }
 
+    // Catalogue fallback inspired by Hume Launcher (Apache-2.0).
+    // https://github.com/petrobot-admin/hume-launcher
+    // JustWatch's unofficial GraphQL interface may change without notice.
+    private var catalogueCache: List<Item> = emptyList()
+    private var catalogueAt = 0L
+    private var catalogueLanguage = ""
+    private fun justWatchNetflix(): List<Item> {
+        val prefs=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE)
+        val lang=if(prefs.getString("language","tr")=="en") "en" else "tr"
+        val now=android.os.SystemClock.elapsedRealtime()
+        if(catalogueCache.isNotEmpty() && catalogueLanguage==lang && now-catalogueAt<30*60*1000L) return catalogueCache
+        val queryText="query NetflixTR(\$country: Country!, \$language: Language!, \$first: Int!, \$filter: TitleFilter) { popularTitles(country: \$country, filter: \$filter, first: \$first, sortBy: POPULAR, sortRandomSeed: 0) { edges { node { content(country: \$country, language: \$language) { title shortDescription backdrops { backdropUrl } } offers(country: \$country, platform: WEB) { standardWebURL package { technicalName } } } } } }"
+        val groups=mutableListOf<List<Item>>()
+        for(kind in listOf("MOVIE","SHOW")) {
+            val group=mutableListOf<Item>()
+            runCatching {
+                val filter=org.json.JSONObject()
+                    .put("packages",org.json.JSONArray().put("nfx"))
+                    .put("objectTypes",org.json.JSONArray().put(kind))
+                    .put("monetizationTypes",org.json.JSONArray().put("FLATRATE"))
+                val vars=org.json.JSONObject().put("country","TR").put("language",lang).put("first",12).put("filter",filter)
+                val request=org.json.JSONObject().put("query",queryText).put("variables",vars).toString()
+                val conn=URL("https://apis.justwatch.com/graphql").openConnection() as java.net.HttpURLConnection
+                try {
+                    conn.requestMethod="POST"
+                    conn.connectTimeout=5000
+                    conn.readTimeout=6000
+                    conn.instanceFollowRedirects=false
+                    conn.doOutput=true
+                    conn.setRequestProperty("Content-Type","application/json")
+                    conn.setRequestProperty("Accept","application/json")
+                    conn.outputStream.use { it.write(request.toByteArray(Charsets.UTF_8)) }
+                    val code=conn.responseCode
+                    if(code!=200) throw java.io.IOException("HTTP $code")
+                    val root=org.json.JSONObject(conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
+                    val edges=root.optJSONObject("data")?.optJSONObject("popularTitles")?.optJSONArray("edges")
+                        ?: throw java.io.IOException("No catalogue response")
+                    for(i in 0 until minOf(edges.length(),12)) {
+                        val node=edges.optJSONObject(i)?.optJSONObject("node") ?: continue
+                        val content=node.optJSONObject("content") ?: continue
+                        val title=content.optString("title").takeIf { it.isNotBlank() } ?: continue
+                        val path=content.optJSONArray("backdrops")?.optJSONObject(0)?.optString("backdropUrl").orEmpty()
+                            .replace("{profile}","s1440").replace("{format}","jpg")
+                        if(!path.startsWith("/")) continue
+                        val art=Uri.parse("https://images.justwatch.com"+path)
+                        var link:Uri?=null
+                        val offers=node.optJSONArray("offers")
+                        if(offers!=null) for(j in 0 until offers.length()) {
+                            val offer=offers.optJSONObject(j) ?: continue
+                            if(offer.optJSONObject("package")?.optString("technicalName")!="netflix") continue
+                            val candidate=Uri.parse(offer.optString("standardWebURL"))
+                            if(candidate.scheme=="https" && candidate.host in setOf("www.netflix.com","netflix.com")) { link=candidate; break }
+                        }
+                        val credit=if(lang=="tr") "Netflix Türkiye · JustWatch" else "Netflix Turkey · JustWatch"
+                        val desc=content.optString("shortDescription").takeUnless { it=="null" }.orEmpty()
+                        group.add(Item(title,if(desc.isBlank()) credit else "$credit • $desc",art,null,link=link))
+                    }
+                    android.util.Log.i("TvShelf","CATALOG source=JustWatch country=TR type=$kind items="+group.size)
+                } finally { conn.disconnect() }
+            }.onFailure { android.util.Log.w("TvShelf","CATALOG source=JustWatch country=TR type=$kind error="+(it.message?.takeIf { msg -> msg.startsWith("HTTP ") } ?: it.javaClass.simpleName)) }
+            groups.add(group)
+        }
+        val mixed=mutableListOf<Item>()
+        for(i in 0 until 12) for(group in groups) group.getOrNull(i)?.let { mixed.add(it) }
+        val result=mixed.distinctBy { it.title }.take(16)
+        if(result.isNotEmpty()) {
+            catalogueCache=result; catalogueAt=now; catalogueLanguage=lang
+        }
+        return result
+    }
+
+    fun currentLink(): Uri? = items.getOrNull(index)?.link
+
     private fun netflixCatalog():List<Item> {
         val prefs=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE)
         val key=prefs.getString("tmdb_api_key","").orEmpty().trim()
@@ -218,14 +291,15 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                 val native=if(liveTv) listOfNotNull(liveChannel(pkg)) else query(pkg)
                 val netflix=pkg in setOf("com.netflix.ninja","com.netflix.mediaclient")
                 val fallback=netflix && native.isEmpty()
-                val result=if(fallback) netflixCatalog() else native
+                val jw=if(fallback) justWatchNetflix() else emptyList()
+                val result=if(fallback) jw.ifEmpty { netflixCatalog() } else native
                 main.post {
                     if (ticket == generation && active) {
                         items = result
                         available = result.isNotEmpty()
                         val images=result.count { it.image!=null }
                         val videos=result.count { it.video!=null }
-                        record(if(liveTv) (if(result.isEmpty()) "Kanal bilgisi yok" else "Kanal: "+result.first().title) else if(fallback) (if(result.isEmpty()) "Netflix: TMDB anahtarı / veri yok" else "TMDB · IMG: $images") else "IMG: $images  VID: $videos")
+                        record(if(liveTv) (if(result.isEmpty()) "Kanal bilgisi yok" else "Kanal: "+result.first().title) else if(fallback) (if(result.isEmpty()) "Netflix: katalog verisi yok" else (if(jw.isNotEmpty()) "JustWatch TR" else "TMDB")+" · IMG: $images") else "IMG: $images  VID: $videos")
                         if (available) show(0) else onItem(null, null)
                     }
                 }
