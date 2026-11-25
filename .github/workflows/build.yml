@@ -82,8 +82,8 @@ jobs:
                 applicationId = "com.tvos.launcher"
                 minSdk = 28
                 targetSdk = 34
-                versionCode = 4
-                versionName = "2.2-beta.1"
+                versionCode = 5
+                versionName = "2.3-beta.1"
             }
 
             buildTypes {
@@ -134,6 +134,13 @@ jobs:
       uses: gradle/actions/setup-gradle@v4
       with:
         gradle-version: '8.7'
+ 
+    - name: Inter Font Kurulumu
+      run: |
+        mkdir -p app/src/main/assets/fonts
+        curl -fL --retry 3 https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip -o /tmp/inter.zip
+        unzip -j -o /tmp/inter.zip "extras/ttf/Inter-Regular.ttf" "extras/ttf/Inter-Medium.ttf" "LICENSE.txt" -d app/src/main/assets/fonts
+
 
     - name: Debug APK Oluştur
       run: gradle :app:assembleDebug
