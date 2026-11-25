@@ -90,21 +90,23 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         .replace(Regex("(?i)(?:\\s|[-_])+(?:fhd|uhd|hd|sd|4k)$"),"")
         .replace(Regex("[^a-z0-9+]"),"")
 
-    private data class ChannelLogo(val name:String,val uri:Uri)
+    private data class ChannelLogo(val name:String,val uri:Uri,val online:Uri?=null)
     private val channelCatalog by lazy {
         val entries=linkedMapOf<String,ChannelLogo>()
-        runCatching {
-            val array=org.json.JSONArray(context.assets.open("turkish_channel_logos.json").bufferedReader(Charsets.UTF_8).use { it.readText() })
+        for(file in listOf("user_channel_logos.json","turkish_channel_logos.json")) runCatching {
+            val array=org.json.JSONArray(context.assets.open(file).bufferedReader(Charsets.UTF_8).use { it.readText() })
             for(i in 0 until array.length()) {
                 val row=array.getJSONObject(i)
                 val name=row.getString("name")
-                val image=uri(row.optString("url")) ?: continue
+                val online=uri(row.optString("url"))
+                val asset=row.optString("asset").takeIf { it.matches(Regex("channel_logos/[0-9]{4}\\.png")) }
+                val image=asset?.let { Uri.parse("asset:///"+it) } ?: online ?: continue
                 val aliases=row.optJSONArray("aliases")
                 val names=mutableListOf(name)
                 if(aliases!=null) for(j in 0 until aliases.length()) names.add(aliases.optString(j))
                 for(alias in names) {
                     val key=normalizeChannel(alias)
-                    if(key.length>=2) entries.putIfAbsent(key,ChannelLogo(name,image))
+                    if(key.length>=2) entries.putIfAbsent(key,ChannelLogo(name,image,online))
                 }
             }
         }
@@ -159,7 +161,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                         val source=if(watched) { if(english) "Recently watched · Live TV" else "Yakın zamanda izlenen · Canlı TV" }
                             else { if(english) "Channel suggestion · Live TV" else "Kanal önerisi · Canlı TV" }
                         best=Item(display,if(program.isNullOrBlank()) source else source+"\n"+program,
-                            logo,null,true,candidate?.uri,providerLogo)
+                            logo,null,true,candidate?.uri,candidate?.online ?: providerLogo)
                         bestTime=score
                     }
                 }
@@ -258,6 +260,11 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     }
 
     private fun load(uri: Uri): Bitmap? = runCatching {
+        if(uri.scheme=="asset") {
+            val path=uri.path?.removePrefix("/") ?: return@runCatching null
+            if(!path.matches(Regex("channel_logos/[0-9]{4}\\.png"))) return@runCatching null
+            return@runCatching context.assets.open(path).use { BitmapFactory.decodeStream(it) }
+        }
         val cacheDir=java.io.File(context.cacheDir,"shelf-images").apply { mkdirs() }
         val remote=uri.scheme=="https"
         val cache=if(remote) java.io.File(cacheDir,java.security.MessageDigest.getInstance("SHA-256").digest(uri.toString().toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }+".img") else null
