@@ -193,7 +193,7 @@ class MainActivity : Activity() {
     private lateinit var shelf: LinearLayout
     private lateinit var heroTitle: TextView
     private lateinit var heroSub: TextView
-    private lateinit var heroArt: ShelfArt
+    private lateinit var heroArt: ImageView
     private lateinit var section: TextView
     private lateinit var rows: LinearLayout
     private lateinit var settings: TextView
@@ -702,9 +702,17 @@ class MainActivity : Activity() {
             if(item != null) {
                 heroTitle.text=item.title.ifBlank { apps.firstOrNull { it.id==selectedId }?.let { displayName(it) }.orEmpty() }
                 heroSub.text=item.description
-                heroArt.visibility=View.INVISIBLE
-                if(bitmap!=null) backdropImage.setImageBitmap(bitmap)
-                backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
+                if(item.channelLogo) {
+                    heroArt.setImageBitmap(bitmap)
+                    heroArt.visibility=if(bitmap!=null) View.VISIBLE else View.INVISIBLE
+                    backdropImage.setImageDrawable(null)
+                    backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TL_BR,intArrayOf(0xff26364d.toInt(),0xff151e2c.toInt(),0xff080b12.toInt()))
+                } else {
+                    heroArt.visibility=View.INVISIBLE
+                    if(bitmap!=null) backdropImage.setImageBitmap(bitmap)
+                    backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
+                }
+                glassSource.invalidate()
             }
         }
         val header = LinearLayout(this).apply {
@@ -776,7 +784,11 @@ class MainActivity : Activity() {
         heroSub = text(t("Uygulamalarını seç", "Choose an app"), 15f, 0xffe0e9f8.toInt()).apply { maxLines = 2 }
         copy.addView(heroSub)
         shelf.addView(copy, LinearLayout.LayoutParams(0, -1, 1f))
-        heroArt = ShelfArt()
+        heroArt = ImageView(this).apply {
+            scaleType=ImageView.ScaleType.FIT_CENTER
+            setPadding(dp(65),dp(32),dp(65),dp(32))
+            visibility=View.INVISIBLE
+        }
         shelf.addView(heroArt, LinearLayout.LayoutParams(0, -1, 1.15f))
         root.addView(shelf, LinearLayout.LayoutParams(-1, dp((screenH * 0.46f).roundToInt().coerceIn(150, 480))).apply {
             topMargin = dp(8); bottomMargin = dp(12)
@@ -928,7 +940,7 @@ class MainActivity : Activity() {
         val newKey=tile?.id?.takeIf { id -> tiles().take(columns).any { it.id==id } && !id.startsWith("hdmi:") }
         if(shelfKey==newKey && newKey!=null && shelfPlayer.available) return
         shelfKey=newKey
-        if(::shelfPlayer.isInitialized) shelfPlayer.select(if(resumed && movingId==null) newKey else null)
+        if(::shelfPlayer.isInitialized) shelfPlayer.select(if(resumed && movingId==null) newKey else null,tile?.let { defaultRank(it)==0 }==true)
         val color = tile?.color ?: 0xff25466c.toInt()
         shelf.background = rounded(Color.TRANSPARENT, 0)
         val customBg = tile?.let { asset(it, "backdrop") }?.takeIf { it.isFile }
@@ -938,6 +950,7 @@ class MainActivity : Activity() {
             else intArrayOf(blend(color, if(light) Color.WHITE else Color.BLACK, if(light) .2f else .28f), 0xff171c27.toInt(), 0xff080b12.toInt()))
         heroTitle.text = tile?.let { displayName(it) } ?: t("Ana Ekran", "Home")
         heroSub.text = if(tile == null) t("Uygulama seç", "Choose an app") else tile.subtitle
+        heroArt.setImageDrawable(null)
         heroArt.visibility = View.INVISIBLE
         glassSource.invalidate()
     }
@@ -1237,8 +1250,6 @@ class MainActivity : Activity() {
         presentGlass(dialog)
         field.requestFocus()
     }
-
-    private inner class ShelfArt : View(this@MainActivity)
 
     private class SettingsGear(private val tintColor:Int):Drawable() {
         private val p=Paint(Paint.ANTI_ALIAS_FLAG)
