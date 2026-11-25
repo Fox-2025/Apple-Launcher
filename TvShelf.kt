@@ -485,9 +485,9 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         if (w <= 0 || h <= 0 || vw <= 0 || vh <= 0) return
         val area=previewBounds ?: return
         if(area.width()<=0 || area.height()<=0) return
-        val factor=minOf(area.width().toFloat()/vw,area.height().toFloat()/vh)
+        val factor=maxOf(w/vw,h/vh)
         val dw=vw*factor; val dh=vh*factor
-        texture.setTransform(Matrix().apply { setScale(dw/w,dh/h); postTranslate(area.left+(area.width()-dw)/2,area.top+(area.height()-dh)/2) })
+        texture.setTransform(Matrix().apply { setScale(dw/w,dh/h); postTranslate((w-dw)/2,if(area.top>0) area.top.toFloat() else (h-dh)/2) })
     }
 
     private fun releasePlayer() {
