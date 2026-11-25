@@ -82,8 +82,8 @@ jobs:
                 applicationId = "com.tvos.launcher"
                 minSdk = 28
                 targetSdk = 34
-                versionCode = 11
-                versionName = "2.3-beta.7"
+                versionCode = 12
+                versionName = "2.3-beta.8"
             }
 
             signingConfigs {
@@ -185,6 +185,34 @@ jobs:
         except Exception as exc:
             print("Optional channel catalog unavailable:", exc)
             dest.write_text("[]", encoding="utf-8")
+        PY
+    - name: Excel kaynaklı yerel kanal logolarını paketle
+      run: |
+        python3 - <<'PY'
+        import json, re, zipfile
+        from pathlib import Path
+        archive = Path("turkish_channel_logos.zip")
+        assets = Path("app/src/main/assets")
+        if not archive.is_file():
+            print("Local channel logo ZIP not uploaded; use online catalog.")
+        else:
+            with zipfile.ZipFile(archive) as z:
+                data = json.loads(z.read("user_channel_logos.json"))
+                count = 0
+                for row in data:
+                    asset = row.get("asset", "")
+                    if not re.fullmatch(r"channel_logos/[0-9]{4}\.png", asset):
+                        row.pop("asset", None)
+                        continue
+                    info = z.getinfo(asset)
+                    if info.file_size > 2000000:
+                        raise ValueError("Oversized logo")
+                    dest = assets / asset
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(z.read(info))
+                    count += 1
+                (assets / "user_channel_logos.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                print(f"Workbook catalog: {len(data)} channels, {count} embedded logos.")
         PY
     - name: Kalıcı imzalı APK oluştur
       env:
