@@ -258,7 +258,7 @@ class MainActivity : Activity() {
             clipToPadding = false
             setPadding(dp(3), dp(8), dp(3), dp(14))
         }
-        scroll.addView(rows, ScrollView.LayoutParams(-1, -2))
+        scroll.addView(rows, FrameLayout.LayoutParams(-1, -2))
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         val hint = text("↑ ↓ ← →  Gezin   •   OK  Aç   •   OK uzun bas  Düzenle", 11f, muted())
         root.addView(hint, LinearLayout.LayoutParams(-1, -2))
