@@ -71,15 +71,28 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                         val i = c.getColumnIndex(column)
                         return if (i >= 0 && !c.isNull(i)) c.getString(i) else null
                     }
-                    while (result.size < 10 && c.moveToNext()) {
-                        if (value("package_name") != pkg || value("browsable") == "0") continue
+                    var matching = 0
+                    var hidden = 0
+                    var usable = 0
+                    val origins = linkedSetOf<String>()
+                    while (c.moveToNext()) {
+                        if (value("package_name") != pkg) continue
+                        matching++
+                        if (value("browsable") == "0") { hidden++; continue }
                         val art = uri(value("poster_art_uri")) ?: uri(value("thumbnail_uri"))
                         val clip = uri(value("preview_video_uri"))
-                        if (art != null || clip != null)
-                            result.add(Item(value("title").orEmpty(), value("short_description").orEmpty(), art, clip))
+                        if (art != null || clip != null) {
+                            usable++
+                            listOfNotNull(art,clip).forEach { source ->
+                                origins.add((source.scheme ?: "?") + "://" + (source.host ?: "?"))
+                            }
+                            if (result.size < 10)
+                                result.add(Item(value("title").orEmpty(), value("short_description").orEmpty(), art, clip))
+                        }
                     }
-                }
-            }.onFailure { android.util.Log.w("TvShelf", "Provider unavailable: " + path, it) }
+                    android.util.Log.i("TvShelf", "SOURCE pkg=$pkg table=$path matches=$matching hidden=$hidden usable=$usable origins=${origins.take(8).joinToString(",")}")
+                } ?: android.util.Log.i("TvShelf", "SOURCE pkg=$pkg table=$path cursor=null")
+            }.onFailure { android.util.Log.w("TvShelf", "SOURCE pkg=$pkg table=$path error=${it.javaClass.simpleName}") }
         }
         return result.toList()
     }
@@ -244,6 +257,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                 if (ticket != generation || !active) bitmap?.recycle()
                 else {
                     onItem(item, bitmap)
+                    android.util.Log.i("TvShelf", "IMAGE pkg=$selectedPackage loaded=${bitmap!=null} scheme=${item.image?.scheme ?: "none"} host=${item.image?.host ?: "none"}")
                     if(item.channelLogo) record("Kanal: "+item.title+if(bitmap!=null) "  LOGO: OK" else "  LOGO: —")
                     main.postDelayed({
                         if (ticket == generation && active) {
