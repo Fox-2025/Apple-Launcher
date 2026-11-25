@@ -86,6 +86,16 @@ jobs:
                 versionName = "2.3-beta.6"
             }
 
+            signingConfigs {
+                getByName("debug") {
+                    storeFile = file(System.getenv("TVOS_KEYSTORE_PATH") ?: error("Missing signing keystore"))
+                    storePassword = System.getenv("TVOS_KEYSTORE_PASSWORD") ?: error("Missing signing password")
+                    keyAlias = "tvos"
+                    keyPassword = System.getenv("TVOS_KEYSTORE_PASSWORD") ?: error("Missing signing password")
+                    storeType = "PKCS12"
+                }
+            }
+
             buildTypes {
                 release {
                     isMinifyEnabled = false
@@ -176,8 +186,25 @@ jobs:
             print("Optional channel catalog unavailable:", exc)
             dest.write_text("[]", encoding="utf-8")
         PY
-    - name: Debug APK Oluştur
-      run: gradle :app:assembleDebug
+    - name: Kalıcı imzalı APK oluştur
+      env:
+        TVOS_KEYSTORE_BASE64: ${{ secrets.TVOS_KEYSTORE_BASE64 }}
+        TVOS_KEYSTORE_PASSWORD: ${{ secrets.TVOS_KEYSTORE_PASSWORD }}
+      run: |
+        set -euo pipefail
+        if [ -z "$TVOS_KEYSTORE_BASE64" ] || [ -z "$TVOS_KEYSTORE_PASSWORD" ]; then
+          echo "::error::Configure TVOS_KEYSTORE_BASE64 and TVOS_KEYSTORE_PASSWORD in repository Actions secrets. Refusing to generate a new debug signing key."
+          exit 1
+        fi
+        umask 077
+        export TVOS_KEYSTORE_PATH="$RUNNER_TEMP/tvos-signing.p12"
+        trap 'rm -f "$TVOS_KEYSTORE_PATH"' EXIT
+        printf '%s' "$TVOS_KEYSTORE_BASE64" | base64 --decode > "$TVOS_KEYSTORE_PATH"
+        unset TVOS_KEYSTORE_BASE64
+        gradle --no-daemon :app:assembleDebug
+        SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+        APKSIGNER="$(find "$SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -1)"
+        "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk
 
     - name: APK Dosyasını Yükle
       uses: actions/upload-artifact@v5
