@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var root: LinearLayout
     private lateinit var backdropImage: ImageView
     private lateinit var backdropTint: View
+    private lateinit var glassSource: GlassBackdrop
     private lateinit var shelfPlayer: TvShelf
     private lateinit var videoSurface: android.view.TextureView
     private lateinit var gridScroll: ScrollView
@@ -487,6 +488,7 @@ class MainActivity : Activity() {
         frame.addView(videoSurface,FrameLayout.LayoutParams(-1,-1))
         backdropTint = View(this)
         frame.addView(backdropTint, FrameLayout.LayoutParams(-1, -1))
+        glassSource=GlassBackdrop(backdropImage,videoSurface,backdropTint)
         frame.addView(root, FrameLayout.LayoutParams(-1, -1))
         setContentView(frame)
         shelfPlayer = TvShelf(this,videoSurface) { item, bitmap ->
@@ -521,10 +523,10 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(7), dp(12), dp(7))
             isFocusable = true
             isClickable = true
-            background = glass(false)
+            background = LiquidGlassDrawable(this,glassSource,dp(22).toFloat())
             setOnClickListener { showSettings() }
             setOnFocusChangeListener { v, focused ->
-                v.background = glass(focused)
+                v.background = LiquidGlassDrawable(v,glassSource,dp(22).toFloat(),focused=focused)
                 v.animate().scaleX(if(focused) 1.10f else 1f).scaleY(if(focused) 1.10f else 1f).setDuration(140).start()
             }
         }
@@ -608,7 +610,7 @@ class MainActivity : Activity() {
                 clipChildren = false
                 clipToPadding = false
                 setPadding(dp(7), dp(10), dp(7), dp(5))
-                if (rowIndex == 0) background = rounded(0x38ffffff, 24, 0x55ffffff, 1)
+                if (rowIndex == 0) background = LiquidGlassDrawable(this,glassSource,dp(24).toFloat(),dark=true)
             }
             for (tile in group) {
                 val card = createCard(tile, height)
@@ -712,6 +714,7 @@ class MainActivity : Activity() {
         heroArt.tile = tile
         heroArt.visibility = if (customBg != null) View.INVISIBLE else View.VISIBLE
         heroArt.invalidate()
+        glassSource.invalidate()
     }
 
     private fun launch(tile: Tile) {
@@ -799,11 +802,7 @@ class MainActivity : Activity() {
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18),dp(16),dp(18),dp(16))
-            background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                intArrayOf(0xc23c4653.toInt(),0xd527303b.toInt(),0xe017202b.toInt())).apply {
-                cornerRadius = dp(30).toFloat()
-                setStroke(dp(1),0x88ffffff.toInt())
-            }
+            background = LiquidGlassDrawable(this,glassSource,dp(30).toFloat(),dark=true)
         }
         val heading = text(title, 24f, Color.WHITE, true).apply {
             setPadding(dp(10),dp(3),dp(10),dp(15))
