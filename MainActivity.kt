@@ -13,6 +13,10 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.*
+import java.io.File
+import java.net.URL
+import java.util.concurrent.Executors
+import org.json.JSONObject
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
@@ -24,6 +28,14 @@ class MainActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
     private lateinit var root: LinearLayout
+    private lateinit var backdropImage: ImageView
+    private lateinit var backdropTint: View
+    private val worker = Executors.newSingleThreadExecutor()
+    private var importing: Pair<String, Boolean>? = null
+    private var pendingFetch = false
+    private var storeIcons = true
+    private var largeIcons = false
+    private val knownIds = mapOf("Netflix" to 363590051L, "YouTube" to 544007664L, "Prime Video" to 545519333L, "Disney+" to 1446075923L, "Apple TV" to 1174078549L, "Apple Music" to 1108187390L, "Max" to 1666653815L, "Spotify" to 324684580L, "Plex" to 383457673L, "VLC" to 650377962L)
     private lateinit var shelf: LinearLayout
     private lateinit var heroTitle: TextView
     private lateinit var heroSub: TextView
@@ -57,11 +69,14 @@ class MainActivity : Activity() {
         order = readList("tile_order")
         hidden = (prefs.getStringSet("hidden", emptySet()) ?: emptySet()).toMutableSet()
         light = prefs.getBoolean("light", false)
+        storeIcons = prefs.getBoolean("store_icons", true)
+        largeIcons = prefs.getBoolean("large_icons", false)
         demo = prefs.getBoolean("demo", false)
         apps = installed()
         if (!prefs.contains("demo") && apps.size < 5) demo = true
         selectedId = savedInstanceState?.getString("selected")
         buildHome()
+        fetchStoreIcons()
     }
 
     override fun onResume() {
@@ -72,6 +87,7 @@ class MainActivity : Activity() {
             if (next.map { it.id to it.title } != apps.map { it.id to it.title }) {
                 apps = next
                 refreshCards()
+                fetchStoreIcons()
             }
         }
     }
@@ -101,7 +117,8 @@ class MainActivity : Activity() {
         prefs.edit().putString("favorites", favorites.joinToString("|"))
             .putString("tile_order", order.joinToString("|"))
             .putStringSet("hidden", hidden.toSet()).putBoolean("demo", demo)
-            .putBoolean("light", light).apply()
+            .putBoolean("light", light).putBoolean("store_icons", storeIcons)
+            .putBoolean("large_icons", largeIcons).apply()
     }
 
     private fun installed(): List<Tile> {
@@ -126,17 +143,136 @@ class MainActivity : Activity() {
     }
 
     private fun samples() = listOf(
-        Tile("demo:tv", "TV", "Film ve dizileri keşfet", 0xff213d7a.toInt(), "▶"),
-        Tile("demo:music", "Müzik", "Sevdiğin müzikler", 0xffce285b.toInt(), "♫"),
-        Tile("demo:movies", "Sinema", "Büyük ekran deneyimi", 0xff5142aa.toInt(), "▣"),
-        Tile("demo:photos", "Fotoğraflar", "Anılarını büyük ekranda gör", 0xff178b9a.toInt(), "✿"),
-        Tile("demo:games", "Oyunlar", "Eğlenceye katıl", 0xffe07831.toInt(), "✚"),
-        Tile("demo:video", "Video", "Video dünyasını keşfet", 0xffa52636.toInt(), "▷"),
-        Tile("demo:store", "Mağaza", "Yeni uygulamalar keşfet", 0xff2473d9.toInt(), "↓"),
-        Tile("demo:radio", "Radyo", "Canlı yayınlar ve ses", 0xff843ca7.toInt(), "◉"),
-        Tile("demo:sports", "Spor", "Karşılaşmalar ve daha fazlası", 0xff217a48.toInt(), "★"),
-        Tile("demo:explore", "Keşfet", "Bir sonraki favorini bul", 0xff40556f.toInt(), "◇")
+        Tile("demo:apple", "Apple TV", "Film ve diziler", 0xff141414.toInt(), "tv"),
+        Tile("demo:netflix", "Netflix", "Diziler ve filmler", 0xff141414.toInt(), "NETFLIX"),
+        Tile("demo:youtube", "YouTube", "Videolar", 0xfff5f5f5.toInt(), "YouTube"),
+        Tile("demo:prime", "Prime Video", "Film ve diziler", 0xff0c407a.toInt(), "prime video"),
+        Tile("demo:disney", "Disney+", "Hikâyeler", 0xff101c46.toInt(), "Disney+"),
+        Tile("demo:music", "Apple Music", "Müzik", 0xffcf234b.toInt(), "Music"),
+        Tile("demo:max", "Max", "Film ve diziler", 0xff142bc7.toInt(), "max"),
+        Tile("demo:spotify", "Spotify", "Müzik ve podcast", 0xff171b19.toInt(), "Spotify"),
+        Tile("demo:plex", "Plex", "Medya kütüphanesi", 0xff262626.toInt(), "Plex"),
+        Tile("demo:vlc", "VLC", "Medya oynatıcı", 0xffd86b17.toInt(), "VLC")
     )
+
+    private fun asset(tile: Tile, kind: String): File =
+        File(filesDir, "art_" + tile.id.replace(Regex("[^A-Za-z0-9._-]"), "_") + "_" + kind + ".png")
+
+    private fun artwork(tile: Tile): Drawable? {
+        val custom = asset(tile, "custom")
+        val store = asset(tile, "store")
+        return when {
+            custom.isFile -> Drawable.createFromPath(custom.absolutePath)
+            storeIcons && store.isFile -> Drawable.createFromPath(store.absolutePath)
+            else -> null
+        }
+    }
+
+    private fun requestBytes(url: String, limit: Int): ByteArray {
+        val conn = URL(url).openConnection() as javax.net.ssl.HttpsURLConnection
+        conn.connectTimeout = 7000
+        conn.readTimeout = 9000
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15")
+        try {
+            return conn.inputStream.use { input ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(16384)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    if (out.size() + n > limit) throw java.io.IOException("Asset too large")
+                    out.write(buf, 0, n)
+                }
+                out.toByteArray()
+            }
+        } finally { conn.disconnect() }
+    }
+
+    private fun appleId(tile: Tile): Long? {
+        val direct = when {
+            tile.id == "com.netflix.ninja" -> 363590051L
+            tile.id == "com.google.android.youtube.tv" -> 544007664L
+            tile.id == "com.amazon.amazonvideo.livingroom" -> 545519333L
+            tile.id == "com.disney.disneyplus" -> 1446075923L
+            tile.id == "com.apple.atve.androidtv.appletv" -> 1174078549L
+            else -> knownIds[tile.title]
+        }
+        return direct
+    }
+
+    private fun fetchStoreIcons() {
+        if (!storeIcons || pendingFetch) return
+        val batch = tiles().filter { appleId(it) != null && !asset(it, "store").isFile }
+        if (batch.isEmpty()) return
+        pendingFetch = true
+        worker.execute {
+            var changed = false
+            for (tile in batch) {
+                val id = appleId(tile) ?: continue
+                runCatching {
+                    val page = requestBytes("https://apps.apple.com/us/app/id" + id + "?platform=tv", 12000000).toString(Charsets.UTF_8)
+                    val marker = Regex("\"adamId\"\\s*:\\s*\"" + id + "\"")
+                    val icon = Regex("\"icon\"\\s*:\\s*\\{[^{}]{0,350}?\"template\"\\s*:\\s*\"([^\"]+?\\.lsr)/\\{w\\}x\\{h\\}\\{c\\}\\.\\{f\\}\"")
+                    var url: String? = null
+                    for (match in marker.findAll(page)) {
+                        val from = match.range.last + 1
+                        val next = Regex("\"adamId\"\\s*:").find(page, from)?.range?.first ?: page.length
+                        val section = page.substring(from, minOf(next, from + 10000))
+                        val found = icon.find(section)?.groupValues?.get(1)
+                        if (found != null && found.startsWith("https://") && URL(found).host.endsWith(".mzstatic.com")) {
+                            url = found + "/500x300bb.png"
+                            break
+                        }
+                    }
+                    val source = url ?: return@runCatching
+                    val bytes = requestBytes(source, 4000000)
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@runCatching
+                    if (bitmap.width.toFloat() / bitmap.height < 1.45f) { bitmap.recycle(); return@runCatching }
+                    asset(tile, "store").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    bitmap.recycle()
+                    changed = true
+                }
+            }
+            runOnUiThread {
+                pendingFetch = false
+                if (changed && !isFinishing && !isDestroyed && ::rows.isInitialized) refreshCards()
+            }
+        }
+    }
+
+    private fun chooseArt(tile: Tile, background: Boolean) {
+        importing = tile.id to background
+        val pick = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*")
+        try { startActivityForResult(pick, 701) } catch (e: Exception) {
+            importing = null
+            Toast.makeText(this, "Dosya seçici bulunamadı", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    @Deprecated("Activity result callback")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val request = importing
+        importing = null
+        if (requestCode != 701 || resultCode != RESULT_OK || request == null) return
+        val uri = data?.data ?: return
+        val tile = (samples() + apps).firstOrNull { it.id == request.first } ?: return
+        runCatching {
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+            val target = if (request.second) 1920 else 800
+            var sample = 1
+            while (maxOf(opts.outWidth, opts.outHeight) / sample > target * 2) sample *= 2
+            val decode = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bitmap = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decode) }
+                ?: throw java.io.IOException("No bitmap")
+            asset(tile, if (request.second) "backdrop" else "custom").outputStream().use {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bitmap.recycle()
+            refreshCards()
+        }.onFailure { Toast.makeText(this, "Görsel yüklenemedi", Toast.LENGTH_SHORT).show() }
+    }
 
     private fun tiles(): List<Tile> {
         val source = if (demo) samples() + apps else apps
@@ -178,29 +314,34 @@ class MainActivity : Activity() {
         val screenH = (metrics.heightPixels / metrics.density).toInt()
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(bg())
-            setPadding(dp(40), dp(18), dp(40), dp(12))
+            setPadding(dp(36), dp(14), dp(36), dp(8))
             clipChildren = false
             clipToPadding = false
         }
-        setContentView(root)
+        val frame = FrameLayout(this).apply { setBackgroundColor(bg()) }
+        backdropImage = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+        frame.addView(backdropImage, FrameLayout.LayoutParams(-1, -1))
+        backdropTint = View(this)
+        frame.addView(backdropTint, FrameLayout.LayoutParams(-1, -1))
+        frame.addView(root, FrameLayout.LayoutParams(-1, -1))
+        setContentView(frame)
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        header.addView(text("tv  •  HOME", 18f, fg(), true))
+        header.addView(View(this), LinearLayout.LayoutParams(1, 1))
         header.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        modeLabel = text("", 11f, muted(), true)
+        modeLabel = text("", 10f, Color.WHITE, true)
         header.addView(modeLabel)
         val clock = TextClock(this).apply {
             format12Hour = "HH:mm"
             format24Hour = "HH:mm"
             textSize = 20f
-            setTextColor(fg())
+            setTextColor(Color.WHITE)
             setPadding(dp(22), 0, dp(20), 0)
         }
         header.addView(clock)
-        settings = text("⚙  Ayarlar", 14f, fg(), true).apply {
+        settings = text("⚙", 20f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(7), dp(12), dp(7))
             isFocusable = true
@@ -218,7 +359,7 @@ class MainActivity : Activity() {
         shelf = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = gradient(0xff203c65.toInt(), 20)
+            background = rounded(Color.TRANSPARENT, 0)
             clipToOutline = true
         }
         val copy = LinearLayout(this).apply {
@@ -226,8 +367,8 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(28), dp(10), dp(8), dp(10))
         }
-        copy.addView(text("TOP SHELF   /   ŞİMDİ KEŞFET", 11f, 0xffd1e2ff.toInt(), true))
-        heroTitle = text("Ana Ekran", 34f, Color.WHITE, true).apply {
+
+        heroTitle = text("Ana Ekran", 42f, Color.WHITE, true).apply {
             maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(0, dp(8), 0, dp(7))
@@ -237,13 +378,14 @@ class MainActivity : Activity() {
         copy.addView(heroSub)
         shelf.addView(copy, LinearLayout.LayoutParams(0, -1, 1f))
         heroArt = ShelfArt()
-        shelf.addView(heroArt, LinearLayout.LayoutParams(0, -1, 1.35f))
-        root.addView(shelf, LinearLayout.LayoutParams(-1, dp((screenH * 0.32f).roundToInt().coerceIn(130, 330))).apply {
+        shelf.addView(heroArt, LinearLayout.LayoutParams(0, -1, 1.15f))
+        root.addView(shelf, LinearLayout.LayoutParams(-1, dp((screenH * 0.46f).roundToInt().coerceIn(150, 480))).apply {
             topMargin = dp(8); bottomMargin = dp(12)
         })
 
         section = text("Uygulamalar", 17f, fg(), true)
-        root.addView(section, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+        section.visibility = View.GONE
+        root.addView(section, LinearLayout.LayoutParams(-1, 0))
         val scroll = ScrollView(this).apply {
             isFillViewport = false
             isVerticalScrollBarEnabled = false
@@ -261,7 +403,7 @@ class MainActivity : Activity() {
         scroll.addView(rows, FrameLayout.LayoutParams(-1, -2))
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         val hint = text("↑ ↓ ← →  Gezin   •   OK  Aç   •   OK uzun bas  Düzenle", 11f, muted())
-        root.addView(hint, LinearLayout.LayoutParams(-1, -2))
+        hint.visibility = View.GONE
         refreshCards()
     }
 
@@ -269,7 +411,7 @@ class MainActivity : Activity() {
         rows.removeAllViews()
         cardViews.clear()
         val data = tiles()
-        modeLabel.text = if (demo) "DEMO  •  ÖRNEK KARTLAR" else "ANDROID TV"
+        modeLabel.text = if (demo) "DEMO" else ""
         section.text = if (showHidden) "Tüm uygulamalar" else if (favorites.isNotEmpty()) "Favoriler ve uygulamalar" else "Uygulamalar"
         if (data.isEmpty()) {
             rows.addView(text("Uygulama bulunamadı. Ayarlar menüsünden demo modunu açabilirsin.", 17f, muted()))
@@ -278,12 +420,15 @@ class MainActivity : Activity() {
             return
         }
         val screenW = (resources.displayMetrics.widthPixels / resources.displayMetrics.density).toInt()
-        val height = ((screenW - 120) / 5f / 1.78f).roundToInt().coerceIn(58, 170)
-        for (group in data.chunked(5)) {
+        val columns = if (largeIcons) 5 else 6
+        val height = ((screenW - 130) / columns.toFloat() / (5f/3f)).roundToInt().coerceIn(48, 190)
+        for ((rowIndex, group) in data.chunked(columns).withIndex()) {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 clipChildren = false
                 clipToPadding = false
+                setPadding(dp(7), dp(10), dp(7), dp(5))
+                if (rowIndex == 0) background = rounded(0x38ffffff, 24, 0x55ffffff, 1)
             }
             for (tile in group) {
                 val card = createCard(tile, height)
@@ -292,7 +437,7 @@ class MainActivity : Activity() {
                 })
                 cardViews[tile.id] = card
             }
-            repeat(5-group.size) { row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f).apply {
+            repeat(columns-group.size) { row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f).apply {
                 marginStart=dp(5); marginEnd=dp(5)
             }) }
             rows.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(9) })
@@ -317,15 +462,16 @@ class MainActivity : Activity() {
             clipToOutline = true
             elevation = dp(3).toFloat()
         }
-        if (tile.banner != null || tile.icon != null) {
+        val downloaded = artwork(tile)
+        if (downloaded != null || tile.banner != null || tile.icon != null) {
             val image = ImageView(this).apply {
-                setImageDrawable(tile.banner ?: tile.icon)
-                scaleType = if (tile.banner != null) ImageView.ScaleType.CENTER_CROP else ImageView.ScaleType.FIT_CENTER
-                if (tile.banner == null) setPadding(dp(10), dp(10), dp(10), dp(10))
+                setImageDrawable(downloaded ?: tile.banner ?: tile.icon)
+                scaleType = if (downloaded != null || tile.banner != null) ImageView.ScaleType.CENTER_CROP else ImageView.ScaleType.FIT_CENTER
+                if (downloaded == null && tile.banner == null) setPadding(dp(10), dp(10), dp(10), dp(10))
             }
             panel.addView(image, FrameLayout.LayoutParams(-1, -1))
         } else {
-            val symbol = text(tile.symbol, (height*0.47f).coerceIn(25f, 63f), Color.WHITE, true).apply {
+            val symbol = text(tile.symbol, (height*0.22f).coerceIn(13f, 32f), if(tile.title == "Netflix") 0xffe50914.toInt() else if(tile.title == "YouTube") Color.BLACK else if(tile.title == "Spotify") 0xff1ed760.toInt() else Color.WHITE, true).apply {
                 gravity = Gravity.CENTER
             }
             panel.addView(symbol, FrameLayout.LayoutParams(-1, -1))
@@ -341,7 +487,7 @@ class MainActivity : Activity() {
         val border = View(this)
         panel.addView(border, FrameLayout.LayoutParams(-1,-1))
         holder.addView(panel, LinearLayout.LayoutParams(-1, dp(height)))
-        val label = text(tile.title, 13f, muted(), true).apply {
+        val label = text(tile.title, 13f, Color.TRANSPARENT, true).apply {
             gravity = Gravity.CENTER
             setSingleLine(true)
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -351,11 +497,11 @@ class MainActivity : Activity() {
         holder.setOnClickListener { launch(tile) }
         holder.setOnLongClickListener { edit(tile); true }
         holder.setOnFocusChangeListener { view, focus ->
-            view.animate().scaleX(if(focus) 1.09f else 1f).scaleY(if(focus) 1.09f else 1f).setDuration(150).start()
+            view.animate().scaleX(if(focus) 1.12f else 1f).scaleY(if(focus) 1.12f else 1f).setDuration(150).start()
             view.translationZ = if(focus) dp(14).toFloat() else 0f
             panel.elevation = if(focus) dp(12).toFloat() else dp(3).toFloat()
             border.background = rounded(Color.TRANSPARENT, 13, if(focus) Color.WHITE else Color.TRANSPARENT, 2)
-            label.setTextColor(if(focus) fg() else muted())
+            label.setTextColor(if(focus) Color.WHITE else Color.TRANSPARENT)
             if (focus) { selectedId = tile.id; updateShelf(tile) }
         }
         return holder
@@ -363,11 +509,17 @@ class MainActivity : Activity() {
 
     private fun updateShelf(tile: Tile?) {
         val color = tile?.color ?: 0xff25466c.toInt()
-        shelf.background = gradient(blend(color, 0xff182238.toInt(), 0.32f), 20)
+        shelf.background = rounded(Color.TRANSPARENT, 0)
+        val customBg = tile?.let { asset(it, "backdrop") }?.takeIf { it.isFile }
+        backdropImage.setImageDrawable(customBg?.let { Drawable.createFromPath(it.absolutePath) })
+        backdropTint.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+            if (customBg != null) intArrayOf(0x22000000, 0x55000000, 0xee080b12.toInt())
+            else intArrayOf(blend(color, if(light) Color.WHITE else Color.BLACK, if(light) .2f else .28f), 0xff171c27.toInt(), 0xff080b12.toInt()))
         heroTitle.text = tile?.title ?: "Ana Ekran"
         heroSub.text = if(tile == null) "Ayarlar üzerinden demo modunu aç"
             else if(tile.launch == null) tile.subtitle + "  •  Demo" else tile.subtitle
         heroArt.tile = tile
+        heroArt.visibility = if (customBg != null) View.INVISIBLE else View.VISIBLE
         heroArt.invalidate()
     }
 
@@ -385,11 +537,14 @@ class MainActivity : Activity() {
     private fun edit(tile: Tile) {
         val list = tiles().map { it.id }.toMutableList()
         val actions = arrayOf(if(tile.id in favorites) "Favorilerden çıkar" else "Favorilere ekle",
-            if(tile.id in hidden) "Göster" else "Gizle", "Bir sıra sola taşı", "Bir sıra sağa taşı")
+            if(tile.id in hidden) "Göster" else "Gizle", "Bir sıra sola taşı", "Bir sıra sağa taşı", "Kendi ikonunu seç", "Arka plan görselini seç", "Özel görselleri kaldır")
         AlertDialog.Builder(this).setTitle(tile.title).setItems(actions) { _, which ->
             when(which) {
                 0 -> if(tile.id in favorites) favorites.remove(tile.id) else favorites.add(tile.id)
                 1 -> if(tile.id in hidden) hidden.remove(tile.id) else hidden.add(tile.id)
+                4 -> { chooseArt(tile, false); return@setItems }
+                5 -> { chooseArt(tile, true); return@setItems }
+                6 -> { asset(tile, "custom").delete(); asset(tile, "backdrop").delete() }
                 2,3 -> {
                     val i = list.indexOf(tile.id)
                     val j = i + if(which == 2) -1 else 1
@@ -408,13 +563,19 @@ class MainActivity : Activity() {
         val actions = arrayOf(if(demo) "Demo modunu kapat" else "Demo modunu aç",
             if(light) "Koyu temaya geç" else "Açık temaya geç",
             if(showHidden) "Gizli uygulamaları gizle" else "Gizli uygulamaları göster",
-            "Uygulamaları yenile", "Android ayarları")
+            "Uygulamaları yenile", "Android ayarları",
+            if (storeIcons) "Apple TV mağaza ikonlarını kapat" else "Apple TV mağaza ikonlarını aç",
+            if (largeIcons) "6 sütun" else "5 büyük sütun", "Varsayılan ana ekran seçimi")
         AlertDialog.Builder(this).setTitle("Ana ekran ayarları").setItems(actions) { _, which ->
             when(which) {
-                0 -> { demo = !demo; save(); refreshCards() }
+                0 -> { demo = !demo; save(); refreshCards(); fetchStoreIcons() }
                 1 -> { light = !light; save(); buildHome() }
                 2 -> { showHidden = !showHidden; refreshCards() }
-                3 -> { apps = installed(); refreshCards() }
+                3 -> { apps = installed(); refreshCards(); fetchStoreIcons() }
+                5 -> { storeIcons = !storeIcons; save(); refreshCards(); fetchStoreIcons() }
+                6 -> { largeIcons = !largeIcons; save(); refreshCards() }
+                7 -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_HOME_SETTINGS)) }
+                    .onFailure { Toast.makeText(this, "TV yazılımı ana ekran seçimine izin vermiyor olabilir.", Toast.LENGTH_LONG).show() }
                 4 -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_SETTINGS)) }
                     .onFailure { Toast.makeText(this, "Ayarlar açılamadı", Toast.LENGTH_SHORT).show() }
             }
@@ -449,7 +610,7 @@ class MainActivity : Activity() {
             val rect = RectF(cx-side/2,cy-side/2,cx+side/2,cy+side/2)
             paint.color = blend(color,Color.BLACK,.27f)
             canvas.drawRoundRect(rect,h*.12f,h*.12f,paint)
-            val image = tile?.banner ?: tile?.icon
+            val image = tile?.let { artwork(it) } ?: tile?.banner ?: tile?.icon
             if(image != null) {
                 val pad = side*.12f
                 val available = side-2*pad
@@ -463,7 +624,7 @@ class MainActivity : Activity() {
                 image.bounds = original
             } else {
                 paint.color = Color.WHITE
-                paint.textSize = side*.48f
+                paint.textSize = side*.18f
                 paint.typeface = Typeface.create("sans-serif-medium",Typeface.NORMAL)
                 paint.textAlign = Paint.Align.CENTER
                 canvas.drawText(tile?.symbol ?: "▶",cx,cy-(paint.ascent()+paint.descent())/2,paint)
