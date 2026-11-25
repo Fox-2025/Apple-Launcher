@@ -11,14 +11,18 @@ internal class GlassBackdrop(private val image: View, private val video: android
     private val tint: View) {
     private var bitmap: Bitmap? = null
     private var stamp = 0L
+    private var lastWidth=0
+    private var lastHeight=0
+    private var videoWasActive=false
     private val origin = IntArray(2)
     data class Frame(val bitmap: Bitmap, val x: Int, val y: Int, val width: Int, val height: Int)
     fun frame(): Frame? {
         val w=image.width; val h=image.height
         if(w<=0 || h<=0) return null
         val now=android.os.SystemClock.uptimeMillis()
-        if(bitmap==null || now-stamp>200) {
-            val bw=minOf(800,w)
+        val videoActive=video.alpha>.5f && video.isAvailable
+        if(bitmap==null || stamp==0L || w!=lastWidth || h!=lastHeight || videoActive!=videoWasActive || (videoActive && now-stamp>330)) {
+            val bw=minOf(640,w)
             val bh=maxOf(1,(h.toFloat()*bw/w).roundToInt())
             val b=Bitmap.createBitmap(bw,bh,Bitmap.Config.ARGB_8888)
             val c=Canvas(b)
@@ -27,11 +31,16 @@ internal class GlassBackdrop(private val image: View, private val video: android
             c.scale(bw.toFloat()/w,bh.toFloat()/h)
             // Image is positioned in the launcher frame; include its actual bounds.
             c.translate(image.left.toFloat(),image.top.toFloat())
+            image.clipBounds?.let { c.clipRect(it) }
             image.draw(c)
             c.restore()
-            if(video.alpha>.5f && video.isAvailable) {
+            if(videoActive) {
                 runCatching { video.getBitmap(bw,bh) }.getOrNull()?.let {
+                    c.save()
+                    video.clipBounds?.let { bounds -> c.clipRect(bounds.left*bw.toFloat()/w,bounds.top*bh.toFloat()/h,bounds.right*bw.toFloat()/w,bounds.bottom*bh.toFloat()/h) }
                     c.drawBitmap(it,0f,0f,null)
+                    c.restore()
+                    it.recycle()
                 }
             }
             c.save()
@@ -40,6 +49,7 @@ internal class GlassBackdrop(private val image: View, private val video: android
             c.restore()
             bitmap=b
             stamp=now
+            lastWidth=w; lastHeight=h; videoWasActive=videoActive
         }
         image.getLocationOnScreen(origin)
         return Frame(bitmap ?: return null,origin[0],origin[1],w,h)
@@ -92,15 +102,15 @@ internal class LiquidGlassDrawable(private val owner:View, private val source:Gl
             canvas.drawRect(0f,0f,w,h,paint)
         }
         paint.shader=null
-        paint.color=if(dark) 0x85101a28.toInt() else if(focused) 0x60ffffff else 0x248ac2ed
+        paint.color=if(dark) 0x70101a28 else if(focused) 0x48ffffff else 0x208ac2ed
         canvas.drawRect(0f,0f,w,h,paint)
-        paint.shader=LinearGradient(0f,0f,w,h,intArrayOf(0x64ffffff,0x12ffffff,0x03ffffff,0x2affffff),floatArrayOf(0f,.25f,.75f,1f),Shader.TileMode.CLAMP)
+        paint.shader=LinearGradient(0f,0f,w,h,intArrayOf(0x48ffffff,0x0affffff,0x02ffffff,0x22ffffff),floatArrayOf(0f,.25f,.75f,1f),Shader.TileMode.CLAMP)
         canvas.drawRect(0f,0f,w,h,paint)
         paint.shader=null
         canvas.restore()
         paint.style=Paint.Style.STROKE
         paint.strokeWidth=if(focused) 2f*owner.resources.displayMetrics.density else owner.resources.displayMetrics.density
-        paint.shader=LinearGradient(rect.left,rect.top,rect.right,rect.bottom,intArrayOf(0xbaffffff.toInt(),0x20ffffff,0x66ffffff),null,Shader.TileMode.CLAMP)
+        paint.shader=LinearGradient(rect.left,rect.top,rect.right,rect.bottom,intArrayOf(0x9affffff.toInt(),0x18ffffff,0x48ffffff),null,Shader.TileMode.CLAMP)
         val inset=paint.strokeWidth/2
         val edge=RectF(rect).apply { inset(inset,inset) }
         canvas.drawRoundRect(edge,maxOf(0f,r-inset),maxOf(0f,r-inset),paint)
@@ -111,7 +121,7 @@ internal class LiquidGlassDrawable(private val owner:View, private val source:Gl
         canvas.drawRoundRect(inner,maxOf(0f,r-3*inset),maxOf(0f,r-3*inset),paint)
         paint.style=Paint.Style.FILL
         unscheduleSelf(redraw)
-        if(owner.isShown) scheduleSelf(redraw,android.os.SystemClock.uptimeMillis()+220)
+        if(owner.isShown) scheduleSelf(redraw,android.os.SystemClock.uptimeMillis()+350)
     }
     @android.annotation.TargetApi(33)
     private fun drawAgsl(c:Canvas,f:GlassBackdrop.Frame,x:Float,y:Float,w:Float,h:Float,r:Float) {
@@ -155,7 +165,7 @@ internal class LiquidGlassDrawable(private val owner:View, private val source:Gl
             val u=ix.toFloat()/nx; val v=iy.toFloat()/ny
             val dx=(u-.5f)*2f; val dy=(v-.5f)*2f
             val edge=maxOf(abs(dx),abs(dy)).pow(4)
-            val bend=1f+.075f*edge
+            val bend=1f+.045f*edge
             mesh[i++]=(dx*bend*.5f+.5f)*w
             mesh[i++]=(dy*bend*.5f+.5f)*h
         }
