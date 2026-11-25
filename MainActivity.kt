@@ -37,6 +37,26 @@ class MainActivity : Activity() {
     private lateinit var videoSurface: android.view.TextureView
     private lateinit var gridScroll: ScrollView
     private var expandedShelf = false
+    private var returnedFromApp=false
+    private var lastOpenedId:String?=null
+    private lateinit var homeHeader:View
+    private lateinit var moveBackdrop:View
+    private inner class SoftFocusLayout(private val soften:()->Boolean):LinearLayout(this@MainActivity) {
+        private var snapshot:Bitmap?=null
+        private val paint=android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        override fun dispatchDraw(canvas:Canvas) {
+            if(!soften() || width<=0 || height<=0) { snapshot=null; super.dispatchDraw(canvas); return }
+            val w=maxOf(1,width/5); val h=maxOf(1,height/5)
+            val b=snapshot?.takeIf { it.width==w && it.height==h } ?: Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also {
+                val c=Canvas(it); c.scale(w.toFloat()/width,h.toFloat()/height); super.dispatchDraw(c); snapshot=it
+            }
+            canvas.drawBitmap(b,null,android.graphics.Rect(0,0,width,height),paint)
+        }
+    }
+    private fun focusBorder(selected:Boolean):Drawable? {
+        if(!selected) return null
+        return android.graphics.drawable.LayerDrawable(arrayOf(rounded(Color.TRANSPARENT,13,0xff151b25.toInt(),4),rounded(Color.TRANSPARENT,13,Color.WHITE,2))).apply { setLayerInset(1,dp(1),dp(1),dp(1),dp(1)) }
+    }
     private var shelfKey: String? = null
     private var resumed = false
     private lateinit var weatherText: TextView
@@ -233,7 +253,8 @@ class MainActivity : Activity() {
         largeIcons = false
         demo = false
         apps = installed()
-        selectedId = savedInstanceState?.getString("selected")
+        selectedId = savedInstanceState?.getString("selected") ?: prefs.getString("last_focused_tile",null)
+        lastOpenedId=prefs.getString("last_opened_tile",null)
         buildHome()
         fetchStoreIcons()
         if (checkSelfPermission("android.permission.READ_TV_LISTINGS") != android.content.pm.PackageManager.PERMISSION_GRANTED &&
@@ -267,13 +288,27 @@ class MainActivity : Activity() {
                 fetchStoreIcons()
             }
         }
+        if(returnedFromApp) {
+            returnedFromApp=false
+            val data=tiles()
+            val target=when(prefs.getString("return_focus","opened")) {
+                "first" -> data.firstOrNull()?.id
+                "last" -> selectedId
+                else -> lastOpenedId ?: selectedId
+            }
+            selectedId=data.firstOrNull { it.id==target }?.id ?: data.firstOrNull()?.id
+            selectedId?.let { cardViews[it]?.requestFocus() }
+        }
         if(::shelfPlayer.isInitialized && selectedId != null) { shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }) }
     }
 
     override fun onPause() {
         resumed=false
+        returnedFromApp=true
+        if(::prefs.isInitialized) prefs.edit().putString("last_focused_tile",selectedId).apply()
         if(expandedShelf && ::gridScroll.isInitialized) {
             expandedShelf=false
+            shelf.isFocusable=false
             gridScroll.visibility=View.VISIBLE
         }
         weatherHandler.removeCallbacks(weatherRefresh)
@@ -571,9 +606,11 @@ class MainActivity : Activity() {
             val primary=(0..11).mapNotNull { rank -> available.firstOrNull { defaultRank(it)==rank && picked.add(it.id) } }
             return primary+available.filterNot { it.id in picked }
         }
-        return available.sortedBy {
+        val sorted=available.sortedBy {
             ranks.indexOf(it.id).let { rank -> if(rank < 0) Int.MAX_VALUE else rank }
-        }
+        }.toMutableList()
+        if("builtin:source" !in ranks) sorted.firstOrNull { it.id=="builtin:source" }?.let { sorted.remove(it); sorted.add(minOf(columns,sorted.size),it) }
+        return sorted
     }
 
     private fun beginMove(tile: Tile) {
@@ -711,6 +748,8 @@ class MainActivity : Activity() {
         frame.addView(videoSurface,FrameLayout.LayoutParams(-1,-1))
         backdropTint = View(this)
         frame.addView(backdropTint, FrameLayout.LayoutParams(-1, -1))
+        moveBackdrop=View(this).apply { setBackgroundColor(0x20000000); visibility=View.GONE }
+        frame.addView(moveBackdrop,FrameLayout.LayoutParams(-1,-1))
         glassSource=GlassBackdrop(backdropImage,videoSurface,backdropTint)
         frame.addView(root, FrameLayout.LayoutParams(-1, -1))
         setContentView(frame)
@@ -731,7 +770,7 @@ class MainActivity : Activity() {
                 glassSource.invalidate()
             }
         }
-        val header = LinearLayout(this).apply {
+        val header = SoftFocusLayout { movingId!=null }.apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
@@ -779,8 +818,9 @@ class MainActivity : Activity() {
         }
         header.addView(settings, LinearLayout.LayoutParams(dp(48), dp(36)))
         root.addView(header, LinearLayout.LayoutParams(-1, dp(36)))
+        homeHeader=header
 
-        shelf = LinearLayout(this).apply {
+        shelf = SoftFocusLayout { movingId!=null }.apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = rounded(Color.TRANSPARENT, 0)
@@ -841,8 +881,10 @@ class MainActivity : Activity() {
     }
 
     private fun refreshCards() {
+        val oldPositions=if(movingId!=null) cardViews.mapValues { (_,v) -> IntArray(2).also { v.getLocationOnScreen(it) } } else emptyMap()
         rows.removeAllViews()
         cardViews.clear()
+        homeHeader.invalidate(); shelf.invalidate(); moveBackdrop.visibility=if(movingId!=null) View.VISIBLE else View.GONE
         val data = tiles()
         modeLabel.text = ""
         moveHint.visibility = if(movingId != null) View.VISIBLE else View.GONE
@@ -878,10 +920,18 @@ class MainActivity : Activity() {
         val selected = data.firstOrNull { it.id == selectedId } ?: data.first()
         updateShelf(selected)
         cardViews[selected.id]?.post { cardViews[selected.id]?.requestFocus() }
+        if(oldPositions.isNotEmpty()) rows.post {
+            for((id,v) in cardViews) {
+                val old=oldPositions[id] ?: continue
+                val loc=IntArray(2); v.getLocationOnScreen(loc)
+                v.translationX=(old[0]-loc[0]).toFloat(); v.translationY=(old[1]-loc[1]).toFloat()
+                v.animate().translationX(0f).translationY(0f).setDuration(190).start()
+            }
+        }
     }
 
     private fun createCard(tile: Tile, height: Int): View {
-        val holder = LinearLayout(this).apply {
+        val holder = SoftFocusLayout { movingId!=null && movingId!=tile.id }.apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             isFocusable = true
@@ -936,11 +986,13 @@ class MainActivity : Activity() {
         holder.setOnClickListener { if(movingId != null) finishMove(true) else launch(tile) }
         holder.setOnLongClickListener { if(movingId == null) edit(tile); true }
         holder.setOnFocusChangeListener { view, focus ->
-            view.animate().scaleX(if(focus) 1.12f else 1f).scaleY(if(focus) 1.12f else 1f).setDuration(150).start()
-            view.translationZ = if(focus) dp(14).toFloat() else 0f
-            panel.elevation = if(focus) dp(12).toFloat() else dp(3).toFloat()
-            border.background = rounded(Color.TRANSPARENT, 13, if(movingId == tile.id) 0xff9edaff.toInt() else if(focus) Color.WHITE else Color.TRANSPARENT, if(movingId == tile.id) 3 else 2)
-            label.setTextColor(if(focus) Color.WHITE else Color.TRANSPARENT)
+            val lifted=if(movingId!=null) movingId==tile.id else focus
+            val scale=if(lifted) (if(movingId!=null) 1.05f else 1.07f) else 1f
+            view.animate().scaleX(scale).scaleY(scale).setDuration(200).start()
+            view.translationZ = if(lifted) dp(10).toFloat() else 0f
+            panel.elevation = if(lifted) dp(8).toFloat() else dp(3).toFloat()
+            border.background = focusBorder(lifted)
+            label.setTextColor(if(lifted) Color.WHITE else Color.TRANSPARENT)
             if (focus) { selectedId = tile.id; updateShelf(tile) }
         }
         return holder
@@ -989,15 +1041,17 @@ class MainActivity : Activity() {
             }
             name+" · "+connection
         }
-        val actions=labels+listOf(t("TV kaynak seçicisini aç","Open TV source selector"))
+        val actions=listOf(t("Canlı TV","Live TV"))+labels+listOf(t("TV kaynak seçicisini aç","Open TV source selector"))
         glassMenu("Source",actions.toTypedArray()) { index ->
-            if(index<inputs.size) {
-                val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(inputs[index].id)
+            if(index==0) { apps.firstOrNull { defaultRank(it)==0 }?.let { launch(it) }; return@glassMenu }
+            if(index<=inputs.size) {
+                val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(inputs[index-1].id)
                 val intent=Intent(Intent.ACTION_VIEW,uri)
                 val tcl=Intent(intent).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")
                 val launched=runCatching { startActivity(tcl); true }.getOrElse {
                     runCatching { startActivity(intent); true }.getOrDefault(false)
                 }
+                if(launched) rememberOpened(tile)
                 if(!launched) Toast.makeText(this,t("Bu TV girişi doğrudan açılamıyor.","This TV input cannot be opened directly."),Toast.LENGTH_LONG).show()
             } else {
                 val original=tile.launch
@@ -1006,6 +1060,8 @@ class MainActivity : Activity() {
             }
         }
     }
+
+    private fun rememberOpened(tile:Tile) { lastOpenedId=tile.id; prefs.edit().putString("last_opened_tile",tile.id).apply() }
 
     private fun launchShelfItem(tile: Tile) {
         val link=shelfPlayer.currentLink(tile.id)
@@ -1039,7 +1095,7 @@ class MainActivity : Activity() {
             val result=runCatching { startActivity(candidate) }
             android.util.Log.i("TvShelf","OPEN pkg="+tile.id+" scheme="+(candidate.data?.scheme ?: "none")+" accepted="+result.isSuccess+
                 (result.exceptionOrNull()?.let { " error="+it.javaClass.simpleName } ?: ""))
-            if(result.isSuccess) return
+            if(result.isSuccess) { rememberOpened(tile); return }
         }
         android.util.Log.i("TvShelf","OPEN pkg="+tile.id+" fallback=app link="+(link!=null))
         Toast.makeText(this,t("İçerik bağlantısı açılamadı; uygulama açılıyor.","Title link unavailable; opening app."),Toast.LENGTH_SHORT).show()
@@ -1053,7 +1109,7 @@ class MainActivity : Activity() {
             Toast.makeText(this, t("Bu giriş açılamıyor.","This input cannot be opened."), Toast.LENGTH_SHORT).show()
             return
         }
-        runCatching { startActivity(intent) }.onFailure {
+        runCatching { startActivity(intent); rememberOpened(tile) }.onFailure {
             Toast.makeText(this, t("Uygulama açılamadı", "Could not open application"), Toast.LENGTH_SHORT).show()
         }
     }
@@ -1118,11 +1174,17 @@ class MainActivity : Activity() {
         }
     }
     private fun generalSettings() {
-        glassMenu(t("Genel","General"),arrayOf(t("Dil","Language")), onBack={showSettings()}) { languageMenu() }
+        glassMenu(t("Genel","General"),arrayOf(t("Dil","Language"),t("TV açılışında Canlı TV: ","Live TV on power on: ")+if(prefs.getBoolean("live_on_power",true)) t("Açık","On") else t("Kapalı","Off")), onBack={showSettings()}) { i ->
+            if(i==0) languageMenu() else { prefs.edit().putBoolean("live_on_power",!prefs.getBoolean("live_on_power",true)).apply(); generalSettings() }
+        }
     }
     private fun appearanceSettings() {
-        glassMenu(t("Görünüm","Appearance"),arrayOf(if(light) t("Koyu","Dark") else t("Açık","Light")),onBack={showSettings()}) {
-            light=!light; save(); buildHome(); appearanceSettings()
+        glassMenu(t("Görünüm","Appearance"),arrayOf(if(light) t("Koyu","Dark") else t("Açık","Light"),t("Görsel kalitesi","Image quality")+" · "+prefs.getString("art_quality","auto"),t("İçerik değişim süresi","Slide interval")+" · "+prefs.getInt("shelf_seconds",9)+" s"),onBack={showSettings()}) { i ->
+            when(i) {
+                0 -> { light=!light; save(); buildHome(); appearanceSettings() }
+                1 -> glassMenu(t("Görsel kalitesi","Image quality"),arrayOf(t("Otomatik","Auto"),"Full HD","4K"),onBack={appearanceSettings()}) { n -> prefs.edit().putString("art_quality",listOf("auto","fhd","4k")[n]).apply(); shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }); appearanceSettings() }
+                2 -> glassMenu(t("İçerik değişim süresi","Slide interval"),arrayOf("6 s","9 s","12 s","20 s"),onBack={appearanceSettings()}) { n -> prefs.edit().putInt("shelf_seconds",listOf(6,9,12,20)[n]).apply(); appearanceSettings() }
+            }
         }
     }
     private fun applicationSettings() {
@@ -1187,7 +1249,8 @@ class MainActivity : Activity() {
             t("Varsayılan başlatıcı seç","Choose default launcher"),
             t("Yardımcı: ","Helper: ")+when { HomeRedirectService.connected -> t("bağlı","connected"); helper -> t("etkin, bağlantı yok","enabled, not connected"); else -> t("kapalı","disabled") },
             t("Erişilebilirlik / ADB kurulum rehberi","Accessibility / ADB setup guide"),
-            "Android "+android.os.Build.VERSION.RELEASE+" • SDK "+android.os.Build.VERSION.SDK_INT),
+            "Android "+android.os.Build.VERSION.RELEASE+" • SDK "+android.os.Build.VERSION.SDK_INT,
+            t("Home dönüş odağı","Home return focus")),
             onBack={showSettings()}) { choice ->
             when(choice) {
                 2 -> {
@@ -1205,6 +1268,7 @@ class MainActivity : Activity() {
                 4 -> {
                     accessibilitySettingsGuide()
                 }
+                6 -> glassMenu(t("Home dönüş odağı","Home return focus"),arrayOf(t("İlk kart","First card"),t("Son açılan uygulama","Last opened app"),t("Son odaklanan kart","Last focused card")),onBack={homeSettings()}) { n -> prefs.edit().putString("return_focus",listOf("first","opened","last")[n]).apply(); homeSettings() }
                 else -> homeSettings()
             }
         }
