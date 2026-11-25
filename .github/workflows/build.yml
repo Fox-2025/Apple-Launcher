@@ -82,8 +82,8 @@ jobs:
                 applicationId = "com.tvos.launcher"
                 minSdk = 28
                 targetSdk = 34
-                versionCode = 9
-                versionName = "2.3-beta.5"
+                versionCode = 10
+                versionName = "2.3-beta.6"
             }
 
             buildTypes {
@@ -142,6 +142,40 @@ jobs:
         unzip -j -o /tmp/inter.zip "extras/ttf/Inter-Regular.ttf" "extras/ttf/Inter-Medium.ttf" "LICENSE.txt" -d app/src/main/assets/fonts
 
 
+    - name: Türkiye kanal logo dizini
+      run: |
+        mkdir -p app/src/main/assets
+        python3 - <<'PY'
+        import json, urllib.request
+        from pathlib import Path
+        dest = Path("app/src/main/assets/turkish_channel_logos.json")
+        try:
+            def fetch(name):
+                url = "https://iptv-org.github.io/api/" + name + ".json"
+                with urllib.request.urlopen(url, timeout=35) as r:
+                    return json.load(r)
+            channels = {c["id"]: c for c in fetch("channels")
+                        if c.get("country") == "TR" and not c.get("is_nsfw") and not c.get("closed")}
+            best = {}
+            for logo in fetch("logos"):
+                cid = logo.get("channel")
+                url = logo.get("url") or ""
+                if cid not in channels or not logo.get("in_use") or not url.startswith("https://"):
+                    continue
+                if str(logo.get("format", "")).upper() not in ("PNG", "JPEG", "WEBP"):
+                    continue
+                score = (not bool(logo.get("feed")), "horizontal" in (logo.get("tags") or []),
+                         min(1200, logo.get("width") or 0))
+                if cid not in best or score > best[cid][0]:
+                    best[cid] = (score, url)
+            data = [{"name": channels[cid]["name"], "aliases": channels[cid].get("alt_names") or [], "url": entry[1]}
+                    for cid, entry in best.items()]
+            dest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            print("Turkish channel logo entries:", len(data))
+        except Exception as exc:
+            print("Optional channel catalog unavailable:", exc)
+            dest.write_text("[]", encoding="utf-8")
+        PY
     - name: Debug APK Oluştur
       run: gradle :app:assembleDebug
 
