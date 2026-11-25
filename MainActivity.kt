@@ -39,6 +39,22 @@ class MainActivity : Activity() {
     private var expandedShelf = false
     private var shelfKey: String? = null
     private var resumed = false
+    private val tvInputs by lazy { getSystemService(android.media.tv.TvInputManager::class.java) }
+    private var inputCallbackRegistered=false
+    private val inputCallback=object:android.media.tv.TvInputManager.TvInputCallback() {
+        override fun onInputAdded(inputId:String) { refreshInputs() }
+        override fun onInputRemoved(inputId:String) { refreshInputs() }
+        override fun onInputUpdated(inputId:String) { refreshInputs() }
+        override fun onInputStateChanged(inputId:String,state:Int) { refreshInputs() }
+    }
+    private fun refreshInputs() {
+        if(!resumed || !::rows.isInitialized) return
+        val next=installed()
+        if(next.map { Triple(it.id,it.title,it.subtitle) } != apps.map { Triple(it.id,it.title,it.subtitle) }) {
+            apps=next
+            if(movingId==null) refreshCards()
+        }
+    }
     private val regularFont by lazy { runCatching { Typeface.createFromAsset(assets,"fonts/Inter-Regular.ttf") }.getOrElse { Typeface.create("sans-serif",Typeface.NORMAL) } }
     private val mediumFont by lazy { runCatching { Typeface.createFromAsset(assets,"fonts/Inter-Medium.ttf") }.getOrElse { Typeface.create("sans-serif-medium",Typeface.NORMAL) } }
     private fun uiFont(bold: Boolean) = if(bold) mediumFont else regularFont
@@ -116,6 +132,9 @@ class MainActivity : Activity() {
         super.onResume()
         resumed = true
         immersive()
+        if(!inputCallbackRegistered) runCatching {
+            tvInputs?.let { it.registerCallback(inputCallback,android.os.Handler(android.os.Looper.getMainLooper())); inputCallbackRegistered=true }
+        }
         if (::rows.isInitialized) {
             val next = installed()
             if (next.map { it.id to it.title } != apps.map { it.id to it.title }) {
@@ -129,6 +148,10 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         resumed=false
+        if(inputCallbackRegistered) {
+            runCatching { tvInputs?.unregisterCallback(inputCallback) }
+            inputCallbackRegistered=false
+        }
         if(::shelfPlayer.isInitialized) shelfPlayer.stop()
         shelfKey=null
         super.onPause()
@@ -185,6 +208,21 @@ class MainActivity : Activity() {
                 val banner = runCatching { pm.getApplicationBanner(pkg) }.getOrNull()
                 result[pkg] = Tile(pkg, title, t("Uygulamayı aç", "Open application"), palette[(pkg.hashCode() and Int.MAX_VALUE) % palette.size],
                     title.take(1).uppercase(), launch, icon, banner)
+            }
+        }
+        runCatching {
+            val manager=tvInputs
+            if(manager!=null) for(input in manager.tvInputList) {
+                if(input.type!=android.media.tv.TvInputInfo.TYPE_HDMI || !input.isPassthroughInput) continue
+                val state=manager.getInputState(input.id)
+                if(state==android.media.tv.TvInputManager.INPUT_STATE_DISCONNECTED) continue
+                val label=input.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() }
+                    ?: input.loadLabel(this).toString().takeIf { it.isNotBlank() }
+                    ?: "HDMI"
+                val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(input.id)
+                val intent=Intent(Intent.ACTION_VIEW,uri)
+                val id="hdmi:"+input.id
+                result[id]=Tile(id,label,if(state==android.media.tv.TvInputManager.INPUT_STATE_CONNECTED) t("HDMI • Bağlı","HDMI • Connected") else t("HDMI • Beklemede","HDMI • Standby"),0xff25344e.toInt(),"HDMI",intent)
             }
         }
         return result.values.sortedBy { it.title.lowercase() }
@@ -860,9 +898,9 @@ class MainActivity : Activity() {
     }
     private fun shelfDiagnostics() {
         val entries=tiles().take(columns).map { tile ->
-            displayName(tile)+"  ·  "+shelfPlayer.status(tile.id)
+            displayName(tile)+"  ·  "+if(tile.id.startsWith("hdmi:")) tile.subtitle else shelfPlayer.status(tile.id)
         }.ifEmpty { listOf(t("Uygulama yok","No apps")) }
-        glassMenu(t("Top Shelf • içerik durumu","Top Shelf • content status"),entries.toTypedArray(),onBack={showSettings()}) { shelfDiagnostics() }
+        glassMenu(t("Top Shelf • IMG: görsel / VID: video","Top Shelf • IMG: image / VID: video"),entries.toTypedArray(),onBack={showSettings()}) { shelfDiagnostics() }
     }
 
     private fun glass(focused: Boolean, radius: Int = 22): GradientDrawable =
