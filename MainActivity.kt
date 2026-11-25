@@ -46,8 +46,8 @@ class MainActivity : Activity() {
             private val p=Paint(Paint.ANTI_ALIAS_FLAG).apply { style=Paint.Style.STROKE }
             override fun draw(c:Canvas) {
                 val rect=RectF(bounds).apply { inset(dp(3).toFloat(),dp(3).toFloat()) }
-                p.color=0xff10141c.toInt(); p.strokeWidth=dp(6).toFloat(); c.drawRoundRect(rect,dp(11).toFloat(),dp(11).toFloat(),p)
-                p.color=Color.WHITE; p.strokeWidth=dp(2).toFloat(); c.drawRoundRect(rect,dp(11).toFloat(),dp(11).toFloat(),p)
+                p.color=0xff10141c.toInt(); p.strokeWidth=dp(7).toFloat(); c.drawRoundRect(rect,dp(11).toFloat(),dp(11).toFloat(),p)
+                p.color=Color.WHITE; p.strokeWidth=dp(3).toFloat(); c.drawRoundRect(rect,dp(11).toFloat(),dp(11).toFloat(),p)
             }
             override fun setAlpha(alpha:Int) { p.alpha=alpha }
             override fun setColorFilter(filter:ColorFilter?) { p.colorFilter=filter }
@@ -254,7 +254,7 @@ class MainActivity : Activity() {
         selectedId = savedInstanceState?.getString("selected") ?: prefs.getString("last_focused_tile",null)
         lastOpenedId=prefs.getString("last_opened_tile",null)
         buildHome()
-        fetchStoreIcons()
+        root.postDelayed({ if(resumed && !isFinishing && !isDestroyed) fetchStoreIcons() },2500L)
         if (checkSelfPermission("android.permission.READ_TV_LISTINGS") != android.content.pm.PackageManager.PERMISSION_GRANTED &&
             !prefs.getBoolean("tv_listing_permission_requested", false)) {
             prefs.edit().putBoolean("tv_listing_permission_requested", true).apply()
@@ -279,7 +279,7 @@ class MainActivity : Activity() {
         if(!inputCallbackRegistered) runCatching {
             tvInputs?.let { it.registerCallback(inputCallback,android.os.Handler(android.os.Looper.getMainLooper())); inputCallbackRegistered=true }
         }
-        if (::rows.isInitialized) {
+        if (::rows.isInitialized && returnedFromApp) {
             val next = installed()
             if (next.map { it.id to it.title } != apps.map { it.id to it.title }) {
                 apps = next
@@ -752,7 +752,7 @@ class MainActivity : Activity() {
                     heroArt.visibility=View.INVISIBLE
                     if(bitmap!=null) {
                         backdropImage.animate().cancel(); backdropImage.setImageBitmap(bitmap); fitArtwork()
-                        backdropImage.alpha=.72f; backdropImage.animate().alpha(1f).setDuration(240).start()
+                        backdropImage.alpha=.88f; backdropImage.animate().alpha(1f).setDuration(300).start()
                     }
                     backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
                 }
@@ -830,7 +830,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(8), 0, dp(7))
         }
         copy.addView(heroTitle)
-        heroSub = text(t("Uygulamalarını seç", "Choose an app"), 15f, 0xffe0e9f8.toInt()).apply { maxLines = 2 }
+        heroSub = text(t("Uygulamalarını seç", "Choose an app"), 15f, 0xffe0e9f8.toInt()).apply { maxLines = 4 }
         copy.addView(heroSub)
         shelf.addView(copy, LinearLayout.LayoutParams(0, -1, 1f))
         heroArt = ImageView(this).apply {
@@ -979,12 +979,12 @@ class MainActivity : Activity() {
             setPadding(0,dp(7),0,dp(2))
         }
         holder.addView(label, LinearLayout.LayoutParams(-1,-2))
-        holder.setOnClickListener { if(movingId != null) finishMove(true) else { holder.animate().scaleX(1.02f).scaleY(1.02f).setDuration(75).withEndAction { if(holder.hasFocus()) holder.animate().scaleX(1.10f).scaleY(1.10f).setDuration(120).start(); launch(tile) }.start() } }
+        holder.setOnClickListener { if(movingId != null) finishMove(true) else { holder.animate().cancel(); holder.scaleX=1.04f; holder.scaleY=1.04f; holder.animate().scaleX(if(holder.hasFocus())1.10f else 1f).scaleY(if(holder.hasFocus())1.10f else 1f).setDuration(150).start(); launch(tile) } }
         holder.setOnLongClickListener { if(movingId == null) edit(tile); true }
         holder.setOnFocusChangeListener { view, focus ->
             val lifted=if(movingId!=null) movingId==tile.id else focus
             val scale=if(lifted) (if(movingId!=null) 1.07f else 1.10f) else 1f
-            view.animate().cancel(); view.animate().scaleX(scale).scaleY(scale).setInterpolator(android.view.animation.DecelerateInterpolator(1.6f)).setDuration(210).start()
+            view.animate().cancel(); view.animate().scaleX(scale).scaleY(scale).setInterpolator(android.view.animation.DecelerateInterpolator(1.8f)).setDuration(190).start()
             view.translationZ = if(lifted) dp(10).toFloat() else 0f
             panel.elevation = if(lifted) dp(8).toFloat() else dp(3).toFloat()
             border.background = focusBorder(lifted)
@@ -1008,11 +1008,11 @@ class MainActivity : Activity() {
         val image=backdropImage.drawable ?: return
         val iw=image.intrinsicWidth.toFloat(); val ih=image.intrinsicHeight.toFloat()
         if(iw<=0 || ih<=0) return
-        // Retain the original full-screen cover scale; Prime only shifts below the header.
-        val factor=maxOf(w/iw,h/ih)
+        // Prime artwork must fit below the header without cropping its embedded labels.
+        val factor=if(prime) minOf(w/iw,(h-top)/ih) else maxOf(w/iw,h/ih)
         backdropImage.imageMatrix=Matrix().apply {
             setScale(factor,factor)
-            postTranslate((w-iw*factor)/2,if(prime) top.toFloat() else (h-ih*factor)/2)
+            postTranslate(if(prime) w-iw*factor else (w-iw*factor)/2,if(prime) top+(h-top-ih*factor)/2 else (h-ih*factor)/2)
         }
         if(::glassSource.isInitialized) glassSource.invalidate()
     }
@@ -1068,24 +1068,28 @@ class MainActivity : Activity() {
     }
 
     private fun sourceMenu(tile:Tile) {
-        val inputs=runCatching { tvInputs?.tvInputList.orEmpty().filter { it.isPassthroughInput }.sortedBy { it.loadLabel(this).toString() } }.getOrDefault(emptyList())
+        val inputs=runCatching { tvInputs?.tvInputList.orEmpty().filter { it.isPassthroughInput && !it.isHidden(this) }.sortedBy { it.loadLabel(this).toString() } }.getOrDefault(emptyList())
         val (dialog,body,items)=newGlassDialog(t("Kaynaklar","Sources"))
         items.addView(text(t("TV girişini seç","Choose a TV input"),14f,0xffc3d0df.toInt()).apply { setPadding(dp(10),0,0,dp(12)) })
         data class Entry(val title:String,val subtitle:String,val kind:String,val action:()->Unit)
         val entries=mutableListOf<Entry>()
         entries.add(Entry(t("Canlı TV","Live TV"),t("Anten / Uydu","Antenna / Satellite"),"tv") { if(LiveTuner.open(this)) apps.firstOrNull { it.id=="com.tcl.tv" }?.let { rememberOpened(it) } else Toast.makeText(this,t("Kanal bilgisi alınamadı","Channel information unavailable"),Toast.LENGTH_SHORT).show() })
         for(input in inputs) {
-            val name=runCatching { input.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() } ?: input.loadLabel(this).toString() }.getOrDefault(input.id)
+            val original=runCatching { input.loadLabel(this).toString() }.getOrDefault(input.id)
+            val custom=runCatching { input.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() && it!=original } }.getOrNull()
+            val name=custom ?: original
             val state=runCatching { tvInputs?.getInputState(input.id) }.getOrNull()
             val status=when(state) {
                 android.media.tv.TvInputManager.INPUT_STATE_CONNECTED -> t("● Bağlı","● Connected")
                 android.media.tv.TvInputManager.INPUT_STATE_CONNECTED_STANDBY -> t("Beklemede","Standby")
-                else -> t("Bağlı değil","Disconnected")
+                android.media.tv.TvInputManager.INPUT_STATE_DISCONNECTED -> t("Bağlı değil","Disconnected")
+                else -> t("Durum bilinmiyor","Status unknown")
             }
-            entries.add(Entry(name,status,if(input.type==android.media.tv.TvInputInfo.TYPE_HDMI) "hdmi" else "source") {
+            entries.add(Entry(name,(if(custom!=null) "$original · " else "")+status,if(input.type==android.media.tv.TvInputInfo.TYPE_HDMI) "hdmi" else "source") {
                 val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(input.id)
                 val intent=Intent(Intent.ACTION_VIEW,uri)
                 val launched=runCatching { startActivity(Intent(intent).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")); true }.getOrElse { runCatching { startActivity(intent); true }.getOrDefault(false) }
+                android.util.Log.i("TvShelf","INPUT id="+input.id+" state="+state+" accepted="+launched)
                 if(launched) rememberOpened(tile) else Toast.makeText(this,t("Giriş açılamadı","Input unavailable"),Toast.LENGTH_SHORT).show()
             })
         }
@@ -1120,6 +1124,9 @@ class MainActivity : Activity() {
 
     private fun launchShelfItem(tile: Tile) {
         val link=shelfPlayer.currentLink(tile.id)
+        if(tile.id=="com.tcl.tv" && link!=null && android.media.tv.TvContract.isChannelUriForTunerInput(link)) {
+            if(runCatching { startActivity(Intent(Intent.ACTION_VIEW,link).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")); true }.getOrDefault(false)) { LiveTuner.remember(this,link); rememberOpened(tile); return }
+        }
         val netflix=tile.id in setOf("com.netflix.ninja","com.netflix.mediaclient")
         val candidates=mutableListOf<Intent>()
         if(link!=null) {
@@ -1159,7 +1166,10 @@ class MainActivity : Activity() {
 
     private fun launch(tile: Tile) {
         if(tile.id=="builtin:source") { sourceMenu(tile); return }
-        if(tile.id=="com.tcl.tv" && LiveTuner.open(this)) { rememberOpened(tile); return }
+        if(tile.id=="com.tcl.tv") {
+            if(LiveTuner.open(this)) rememberOpened(tile) else Toast.makeText(this,t("Canlı TV kanalı bulunamadı","Live TV channel unavailable"),Toast.LENGTH_SHORT).show()
+            return
+        }
         val intent = tile.launch
         if (intent == null) {
             Toast.makeText(this, t("Bu giriş açılamıyor.","This input cannot be opened."), Toast.LENGTH_SHORT).show()
