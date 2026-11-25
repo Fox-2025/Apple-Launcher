@@ -17,20 +17,43 @@ class HomeRedirectService : AccessibilityService() {
     private var receiverRegistered=false
     private val prefs by lazy { getSharedPreferences("launcher_prefs",MODE_PRIVATE) }
     private val powerManager by lazy { getSystemService(android.os.PowerManager::class.java) }
-    private val openLive=Runnable {
-        if(prefs.getBoolean("live_on_power",true) && powerManager?.isInteractive==true && connected) {
-            val accepted=LiveTuner.open(this)
-            android.util.Log.i("HomeRedirectService","POWER tuner accepted="+accepted)
+    private var wakePending=false
+    private var wakeAttempt=0
+    private var stockSeen=false
+    private var wakeStarted=0L
+    private val openLive=object:Runnable {
+        override fun run() {
+            if(!wakePending) return
+            if(!prefs.getBoolean("live_on_power",true) || powerManager?.isInteractive!=true || !connected) {
+                wakePending=false; return
+            }
+            val accepted=LiveTuner.open(this@HomeRedirectService)
+            wakeAttempt++
+            android.util.Log.i("HomeRedirectService","POWER tuner accepted="+accepted+" attempt="+wakeAttempt+" elapsed="+(SystemClock.elapsedRealtime()-wakeStarted))
+            if(!accepted && wakeAttempt<2) { powerHandler.postDelayed(this,650); return }
+            wakePending=false
+            if(!accepted && stockSeen) redirectHome()
         }
     }
     private fun scheduleLive() {
+        if(!prefs.getBoolean("live_on_power",true) || wakePending) return
+        wakePending=true; wakeAttempt=0; stockSeen=false; wakeStarted=SystemClock.elapsedRealtime()
         powerHandler.removeCallbacks(openLive)
-        if(prefs.getBoolean("live_on_power",true)) powerHandler.postDelayed(openLive,3000)
+        powerHandler.postDelayed(openLive,150)
+    }
+    private fun redirectHome() {
+        val now=SystemClock.uptimeMillis()
+        if(now-lastRedirect<350L) return
+        lastRedirect=now
+        runCatching {
+            startActivity(Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        }.onFailure { android.util.Log.w("HomeRedirectService","Home redirect failed",it) }
     }
     private val screenReceiver=object:android.content.BroadcastReceiver() {
         override fun onReceive(context:android.content.Context?,intent:Intent?) {
             when(intent?.action) {
-                Intent.ACTION_SCREEN_OFF -> { screenWasOff=true; prefs.edit().putBoolean("screen_off_pending",true).apply(); powerHandler.removeCallbacks(openLive); android.util.Log.i("HomeRedirectService","POWER screen_off") }
+                Intent.ACTION_SCREEN_OFF -> { screenWasOff=true; wakePending=false; stockSeen=false; prefs.edit().putBoolean("screen_off_pending",true).apply(); powerHandler.removeCallbacks(openLive); android.util.Log.i("HomeRedirectService","POWER screen_off") }
                 Intent.ACTION_SCREEN_ON -> { android.util.Log.i("HomeRedirectService","POWER screen_on"); if(screenWasOff || prefs.getBoolean("screen_off_pending",false)) { screenWasOff=false; prefs.edit().remove("screen_off_pending").apply(); scheduleLive() } }
             }
         }
@@ -45,6 +68,7 @@ class HomeRedirectService : AccessibilityService() {
     }
     private fun stopPower() {
         powerHandler.removeCallbacks(openLive)
+        wakePending=false
         if(receiverRegistered) { runCatching { unregisterReceiver(screenReceiver) }; receiverRegistered=false }
         if(activeInstance===this) activeInstance=null
     }
@@ -75,13 +99,14 @@ class HomeRedirectService : AccessibilityService() {
         // Avoid redirecting configuration, account, permission or onboarding panels.
         val name = cls.substringAfterLast('.')
         if (name !in setOf("HomeActivity","MainActivity","LauncherActivity","TvLauncherActivity")) return
-        val now = SystemClock.uptimeMillis()
-        if (now - lastRedirect < 350L) return
-        lastRedirect = now
-        runCatching {
-            startActivity(Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
-        }.onFailure { android.util.Log.w("HomeRedirectService","Home redirect failed",it) }
+        // During a confirmed wake only, skip our launcher and try the tuner first.
+        if(wakePending) {
+            stockSeen=true
+            powerHandler.removeCallbacks(openLive)
+            powerHandler.post(openLive)
+            return
+        }
+        redirectHome()
     }
 
     override fun onDestroy() { connected=false; stopPower(); super.onDestroy() }
