@@ -3,4 +3,5 @@
     <string name="hidden_show">Gizlenenleri göster</string>
     <string name="hidden_apps">Gizli Uygulamalar</string>
     <string name="app_image">Uygulama görseli</string>
+    <string name="app_icon">Uygulama simgesi</string>
 </resources>
