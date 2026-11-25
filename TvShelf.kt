@@ -35,6 +35,12 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     private var ready = false
     private var vw = 0
     private var vh = 0
+    private var previewBounds:android.graphics.Rect?=null
+    fun setPreviewBounds(bounds:android.graphics.Rect) {
+        previewBounds=android.graphics.Rect(bounds)
+        texture.clipBounds=bounds
+        fit()
+    }
     var available = false
         private set
 
@@ -477,8 +483,11 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val w = texture.width.toFloat()
         val h = texture.height.toFloat()
         if (w <= 0 || h <= 0 || vw <= 0 || vh <= 0) return
-        val factor = minOf(w / vw, h / vh)
-        texture.setTransform(Matrix().apply { setScale(vw * factor / w, vh * factor / h, w / 2, h / 2) })
+        val area=previewBounds ?: return
+        if(area.width()<=0 || area.height()<=0) return
+        val factor=minOf(area.width().toFloat()/vw,area.height().toFloat()/vh)
+        val dw=vw*factor; val dh=vh*factor
+        texture.setTransform(Matrix().apply { setScale(dw/w,dh/h); postTranslate(area.left+(area.width()-dw)/2,area.top+(area.height()-dh)/2) })
     }
 
     private fun releasePlayer() {
