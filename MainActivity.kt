@@ -446,6 +446,10 @@ class MainActivity : Activity() {
     @Deprecated("Activity result callback")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if(requestCode==231) {
+            homeSettings()
+            return
+        }
         val request = importing
         importing = null
         if (requestCode != 701 || resultCode != RESULT_OK || request == null) return
@@ -920,30 +924,44 @@ class MainActivity : Activity() {
         }
     }
     private fun homeSettings() {
-        val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-        val current = packageManager.resolveActivity(home,android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
-        val isDefault = current?.activityInfo?.packageName == packageName
-        val status = if(isDefault) t("Varsayılan ana ekran: TVOS Launcher","Default home: TVOS Launcher") else t("Varsayılan ana ekran: sistem","Default home: system")
-        glassMenu(t("Ana ekran","Home screen"),arrayOf(status,t("Varsayılan başlatıcı seç","Choose default launcher"),t("Ana ekran yardımcısı • Erişilebilirlik","Home helper • Accessibility")),onBack={showSettings()}) { choice ->
+        val home=Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        val current=packageManager.resolveActivity(home,android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+        val resolved=current?.activityInfo?.packageName.orEmpty()
+        val isDefault=resolved==packageName
+        val roles=if(android.os.Build.VERSION.SDK_INT>=29) getSystemService(android.app.role.RoleManager::class.java) else null
+        val roleHeld=if(android.os.Build.VERSION.SDK_INT>=29) runCatching { roles?.isRoleHeld(android.app.role.RoleManager.ROLE_HOME)==true }.getOrDefault(false) else false
+        val helper=runCatching {
+            getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+                ?.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                ?.any { it.resolveInfo.serviceInfo.packageName==packageName }==true
+        }.getOrDefault(false)
+        val status=if(isDefault) "TVOS Launcher" else resolved.ifBlank { "—" }
+        glassMenu(t("Ana ekran","Home screen"),arrayOf(
+            t("Varsayılan: ","Default: ")+status,
+            "HOME role: "+if(roleHeld) t("verildi","granted") else t("verilmedi","not granted"),
+            t("Varsayılan başlatıcı seç","Choose default launcher"),
+            t("Yardımcı: ","Helper: ")+if(helper) t("etkin","enabled") else t("kapalı","disabled"),
+            t("Erişilebilirlik ayarlarını aç","Open accessibility settings"),
+            "Android "+android.os.Build.VERSION.RELEASE+" • SDK "+android.os.Build.VERSION.SDK_INT),
+            onBack={showSettings()}) { choice ->
             when(choice) {
-                0 -> homeSettings()
-                1 -> {
-                    homeSettings()
+                2 -> {
                     val launched=runCatching {
-                        if(android.os.Build.VERSION.SDK_INT>=29) {
-                            val roles=getSystemService(android.app.role.RoleManager::class.java)
-                            if(roles!=null && roles.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME) && !roles.isRoleHeld(android.app.role.RoleManager.ROLE_HOME)) {
-                                startActivityForResult(roles.createRequestRoleIntent(android.app.role.RoleManager.ROLE_HOME),231)
-                                true
-                            } else if(isDefault) true else false
+                        if(android.os.Build.VERSION.SDK_INT>=29 && roles!=null && roles.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME) && !roleHeld) {
+                            startActivityForResult(roles.createRequestRoleIntent(android.app.role.RoleManager.ROLE_HOME),231)
+                            true
                         } else false
                     }.getOrDefault(false)
-                    if(!launched) openSystemSettings(android.provider.Settings.ACTION_HOME_SETTINGS)
+                    if(!launched) {
+                        homeSettings()
+                        openSystemSettings(android.provider.Settings.ACTION_HOME_SETTINGS)
+                    }
                 }
-                2 -> {
+                4 -> {
                     homeSettings()
                     openSystemSettings(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
                 }
+                else -> homeSettings()
             }
         }
     }
