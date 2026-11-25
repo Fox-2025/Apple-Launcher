@@ -19,6 +19,8 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     data class Item(val title: String, val description: String, val image: Uri?, val video: Uri?,
         val channelLogo:Boolean=false, val fallbackLogo:Uri?=null, val catalogLogo:Uri?=null, val link:Uri?=null)
     private val worker = Executors.newSingleThreadExecutor()
+    private val liveWorker = Executors.newSingleThreadExecutor()
+    private val channelListener:()->Unit = { if(active && selectedPackage=="com.tcl.tv") select("com.tcl.tv",true) }
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var generation = 0
     private val nativeCache=mutableMapOf<String,Pair<Long,List<Item>>>()
@@ -47,6 +49,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         private set
 
     init {
+        ChannelLogoService.addListener(channelListener)
         texture.alpha = 0f
         texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
@@ -162,7 +165,8 @@ internal class TvShelf(private val context: Context, private val texture: Textur
             }
         }
         android.util.Log.i("TvShelf","LIVE channel="+actual.number+" "+actual.name+" catalog="+(candidate!=null)+" provider="+(providerLogo!=null))
-        return Item(actual.name,(if(en) "Live TV" else "Canlı TV")+" · "+actual.number,providerLogo,null,true,candidate?.uri,candidate?.online)
+        val local=candidate?.uri?.takeIf { it.scheme=="asset" }
+        return Item(actual.name,(if(en) "Live TV" else "Canlı TV")+" · "+actual.number,local ?: providerLogo,null,true,if(local!=null) providerLogo else candidate?.uri,candidate?.online)
     }
 
     // Catalogue fallback inspired by Hume Launcher (Apache-2.0).
@@ -284,7 +288,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         record("…")
         val ticket = generation
         main.postDelayed({
-            if (ticket == generation && active) worker.execute {
+            if (ticket == generation && active) (if(liveTv) liveWorker else worker).execute {
                 if(ticket!=generation) return@execute
                 val now=android.os.SystemClock.elapsedRealtime()
                 val cached=nativeCache[pkg]?.takeIf { !liveTv && now-it.first<60000L }?.second
@@ -306,7 +310,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                     }
                 }
             }
-        }, 350L)
+        }, if(liveTv) 0L else 350L)
     }
 
     fun next(delta: Int) {
@@ -327,7 +331,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val ticket = ++generation
         video = item.video
         onItem(item, null)
-        worker.execute {
+        (if(item.channelLogo) liveWorker else worker).execute {
             if(ticket!=generation) return@execute
             val bitmap = item.image?.let { load(it) } ?: item.fallbackLogo?.let { load(it) } ?: item.catalogLogo?.let { load(it) }
             main.post {
@@ -342,7 +346,6 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                             startVideo()
                         }
                     }, if (bitmap != null) 3500L else 0L)
-                    if(item.channelLogo) main.postDelayed({ if(ticket==generation && active) selectedPackage?.let { select(it,true) } },60000L)
                     main.postDelayed({
                         if (ticket == generation && active && items.size > 1) next(1)
                     }, if (item.video != null) 35000L else context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getInt("shelf_seconds",9).coerceIn(6,20)*1000L)
@@ -483,10 +486,12 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     }
 
     fun destroy() {
+        ChannelLogoService.removeListener(channelListener)
         stop()
         texture.surfaceTextureListener = null
         surface?.release()
         surface = null
         worker.shutdownNow()
+        liveWorker.shutdownNow()
     }
 }
