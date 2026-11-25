@@ -74,6 +74,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                     var matching = 0
                     var hidden = 0
                     var usable = 0
+                    var links = 0
                     val origins = linkedSetOf<String>()
                     while (c.moveToNext()) {
                         if (value("package_name") != pkg) continue
@@ -86,11 +87,13 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                             listOfNotNull(art,clip).forEach { source ->
                                 origins.add((source.scheme ?: "?") + "://" + (source.host ?: "?"))
                             }
+                            val link=value("intent_uri")?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+                            if(link!=null) links++
                             if (result.size < 10)
-                                result.add(Item(value("title").orEmpty(), value("short_description").orEmpty(), art, clip))
+                                result.add(Item(value("title").orEmpty(), value("short_description").orEmpty(), art, clip,link=link))
                         }
                     }
-                    android.util.Log.i("TvShelf", "SOURCE pkg=$pkg table=$path matches=$matching hidden=$hidden usable=$usable origins=${origins.take(8).joinToString(",")}")
+                    android.util.Log.i("TvShelf", "SOURCE pkg=$pkg table=$path matches=$matching hidden=$hidden usable=$usable links=$links origins=${origins.take(8).joinToString(",")}")
                 } ?: android.util.Log.i("TvShelf", "SOURCE pkg=$pkg table=$path cursor=null")
             }.onFailure { android.util.Log.w("TvShelf", "SOURCE pkg=$pkg table=$path error=${it.javaClass.simpleName}") }
         }
@@ -240,7 +243,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                         val desc=content.optString("shortDescription").takeUnless { it=="null" }.orEmpty()
                         group.add(Item(title,if(desc.isBlank()) credit else "$credit • $desc",art,null,link=link))
                     }
-                    android.util.Log.i("TvShelf","CATALOG source=JustWatch country=TR type=$kind items="+group.size)
+                    android.util.Log.i("TvShelf","CATALOG source=JustWatch country=TR type=$kind items="+group.size+" links="+group.count { it.link!=null })
                 } finally { conn.disconnect() }
             }.onFailure { android.util.Log.w("TvShelf","CATALOG source=JustWatch country=TR type=$kind error="+(it.message?.takeIf { msg -> msg.startsWith("HTTP ") } ?: it.javaClass.simpleName)) }
             groups.add(group)
@@ -254,7 +257,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         return result
     }
 
-    fun currentLink(): Uri? = items.getOrNull(index)?.link
+    fun currentLink(pkg:String): Uri? = if(active && selectedPackage==pkg) items.getOrNull(index)?.link else null
 
     private fun netflixCatalog():List<Item> {
         val prefs=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE)
