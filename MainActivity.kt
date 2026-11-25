@@ -52,6 +52,8 @@ class MainActivity : Activity() {
         weatherHandler.postDelayed(weatherRefresh,30*60*1000L)
         if(weatherBusy) return
         val city=weatherCity()
+        val savedLat=prefs.getString("weather_lat",null)?.toDoubleOrNull()
+        val savedLon=prefs.getString("weather_lon",null)?.toDoubleOrNull()
         val ticket=++weatherTicket
         weatherBusy=true
         val old=prefs.getString("weather_display",null)
@@ -65,8 +67,10 @@ class MainActivity : Activity() {
                     val c=URL(url).openConnection().apply { connectTimeout=6000; readTimeout=6000 }
                     return JSONObject(c.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() })
                 }
-                val geo=json("https://geocoding-api.open-meteo.com/v1/search?name="+query+"&count=10&language=tr&format=json").getJSONArray("results")
-                val location=(0 until geo.length()).map { geo.getJSONObject(it) }.firstOrNull { it.optString("country_code")=="TR" } ?: geo.getJSONObject(0)
+                val location=if(savedLat!=null && savedLon!=null) JSONObject().put("latitude",savedLat).put("longitude",savedLon).put("name",city) else {
+                    val geo=json("https://geocoding-api.open-meteo.com/v1/search?name="+query+"&count=10&language=tr&format=json").getJSONArray("results")
+                    (0 until geo.length()).map { geo.getJSONObject(it) }.firstOrNull { it.optString("country_code")=="TR" } ?: geo.getJSONObject(0)
+                }
                 val lat=location.getDouble("latitude"); val lon=location.getDouble("longitude")
                 val current=json("https://api.open-meteo.com/v1/forecast?latitude="+lat+"&longitude="+lon+"&current=temperature_2m,weather_code,is_day&timezone=auto").getJSONObject("current")
                 val code=current.getInt("weather_code")
@@ -93,23 +97,65 @@ class MainActivity : Activity() {
         }
     }
     private fun weatherSettings() {
-        val (dialog,_,items)=newGlassDialog(t("Hava durumu • Bölge","Weather • Location"))
-        dialog.setOnCancelListener { dialog.dismiss(); generalSettings() }
+        val (dialog,_,items)=newGlassDialog(t("Hava durumu • Bölge seçimi","Weather • Choose location"))
+        dialog.setOnCancelListener { dialog.dismiss(); showSettings() }
+        items.addView(text(t("Mevcut bölge: ","Current location: ")+weatherCity(),15f,Color.WHITE))
         val field=EditText(this).apply {
             setText(weatherCity()); setSingleLine(true); setTextColor(Color.WHITE); typeface=uiFont(false)
-            hint=t("Şehir veya ilçe","City or district"); setPadding(dp(12),dp(8),dp(12),dp(8))
+            hint=t("Şehir veya ilçe yazın","Enter a city or district"); setPadding(dp(12),dp(8),dp(12),dp(8))
+            selectAllOnFocus=true
         }
         items.addView(field)
-        items.addView(menuRow(t("Kaydet","Save")) {
-            val city=field.text.toString().trim().take(70)
-            if(city.isNotBlank()) {
-                prefs.edit().putString("weather_city",city).remove("weather_time").apply()
-                weatherTicket++; weatherText.text=city+"  ·  —°"; refreshWeather()
+        val resultBox=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        fun select(city:String,lat:Double,lon:Double) {
+            prefs.edit().putString("weather_city",city).putString("weather_lat",lat.toString())
+                .putString("weather_lon",lon.toString()).remove("weather_time").apply()
+            weatherTicket++
+            weatherText.text=city+"  ·  —°"
+            refreshWeather()
+            dialog.dismiss(); showSettings()
+        }
+        val search=menuRow(t("Bölge ara","Search location")) {
+            val query=field.text.toString().trim().take(70)
+            if(query.length<2) return@menuRow
+            resultBox.removeAllViews()
+            resultBox.addView(text(t("Aranıyor…","Searching…"),14f,Color.LTGRAY))
+            weatherWorker.execute {
+                val results=runCatching {
+                    val q=java.net.URLEncoder.encode(query,"UTF-8")
+                    val c=URL("https://geocoding-api.open-meteo.com/v1/search?name="+q+"&count=15&language=tr&format=json")
+                        .openConnection().apply { connectTimeout=6000; readTimeout=6000 }
+                    val arr=JSONObject(c.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() }).optJSONArray("results")
+                    if(arr==null) emptyList<JSONObject>() else (0 until arr.length()).map { arr.getJSONObject(it) }
+                        .sortedBy { if(it.optString("country_code")=="TR") 0 else 1 }
+                }
+                weatherHandler.post {
+                    if(!dialog.isShowing) return@post
+                    resultBox.removeAllViews()
+                    val locations=results.getOrDefault(emptyList())
+                    if(locations.isEmpty()) resultBox.addView(text(if(results.isFailure) t("Bağlantı hatası. Tekrar deneyin.","Connection error. Try again.") else t("Bölge bulunamadı.","No locations found."),14f,Color.LTGRAY))
+                    var first:View?=null
+                    locations.forEach { place ->
+                        val name=place.optString("name")
+                        val region=listOf(place.optString("admin1"),place.optString("country")).filter { it.isNotBlank() && it!=name }.distinct().joinToString(", ")
+                        val label=if(region.isBlank()) name else name+" · "+region
+                        val row=menuRow(label) { select(name,place.getDouble("latitude"),place.getDouble("longitude")) }
+                        resultBox.addView(row)
+                        if(first==null) first=row
+                    }
+                    first?.requestFocus()
+                }
             }
-            dialog.dismiss(); generalSettings()
-        })
+        }
+        items.addView(search)
+        items.addView(resultBox)
+        items.addView(text(t("Hızlı seçim","Quick selection"),14f,Color.LTGRAY))
+        listOf(Triple("İstanbul",41.01,28.95),Triple("Ankara",39.93,32.86),Triple("İzmir",38.42,27.14),
+            Triple("Bursa",40.20,29.06),Triple("Antalya",36.90,30.71)).forEach { place ->
+            items.addView(menuRow(place.first+(if(weatherCity()==place.first) "  ✓" else "")) { select(place.first,place.second,place.third) })
+        }
         items.addView(text("Weather data: Open-Meteo.com · CC BY 4.0",12f,Color.LTGRAY))
-        presentGlass(dialog); field.requestFocus()
+        presentGlass(dialog); search.requestFocus()
     }
     private val tvInputs by lazy { getSystemService(android.media.tv.TvInputManager::class.java) }
     private var inputCallbackRegistered=false
@@ -891,7 +937,7 @@ class MainActivity : Activity() {
     private fun showSettings() {
         glassMenu(t("Ayarlar","Settings"),arrayOf(t("Genel  ›","General  ›"),t("Görünüm  ›","Appearance  ›"),
             t("Uygulamalar  ›","Applications  ›"),t("Ana ekran  ›","Home screen  ›"),
-            t("Top Shelf durumu  ›","Top Shelf status  ›"),t("TV ayarları  ›","TV settings  ›"))) { which ->
+            t("Top Shelf durumu  ›","Top Shelf status  ›"),t("TV ayarları  ›","TV settings  ›"),t("Hava durumu • ","Weather • ")+weatherCity()+"  ›")) { which ->
             when(which) {
                 0 -> generalSettings()
                 1 -> appearanceSettings()
@@ -899,11 +945,12 @@ class MainActivity : Activity() {
                 3 -> homeSettings()
                 4 -> shelfDiagnostics()
                 5 -> openTvSettings()
+                6 -> weatherSettings()
             }
         }
     }
     private fun generalSettings() {
-        glassMenu(t("Genel","General"),arrayOf(t("Dil","Language"),t("Hava durumu • ","Weather • ")+weatherCity()), onBack={showSettings()}) { if(it==0) languageMenu() else weatherSettings() }
+        glassMenu(t("Genel","General"),arrayOf(t("Dil","Language")), onBack={showSettings()}) { languageMenu() }
     }
     private fun appearanceSettings() {
         glassMenu(t("Görünüm","Appearance"),arrayOf(if(light) t("Koyu","Dark") else t("Açık","Light")),onBack={showSettings()}) {
