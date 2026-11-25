@@ -29,22 +29,37 @@ jobs:
         [ -f "item_app.xml" ] && cp -f item_app.xml app/src/main/res/layout/item_app.xml
         [ -d "res" ] && cp -rf res/* app/src/main/res/
 
-        # Gradle .kts dosyalarını yerleştir
-        if [ -f "build.gradle (project)" ]; then
-          rm -f build.gradle build.gradle.kts
-          cp -f "build.gradle (project)" build.gradle.kts
-        fi
+        # Eski build.gradle dosyalarını silip .kts olarak yerleştir
+        rm -f build.gradle build.gradle.kts app/build.gradle app/build.gradle.kts
+        cp -f "build.gradle (project)" build.gradle.kts
+        cp -f "build.gradle (App)" app/build.gradle.kts
 
-        if [ -f "build.gradle (App)" ]; then
-          rm -f app/build.gradle app/build.gradle.kts
-          cp -f "build.gradle (App)" app/build.gradle.kts
-        fi
+        # settings.gradle.kts dosyasını Google deposuyla yeniden oluştur
+        rm -f settings.gradle settings.gradle.kts
+        cat << 'EOF' > settings.gradle.kts
+        pluginManagement {
+            repositories {
+                google()
+                mavenCentral()
+                gradlePluginPortal()
+            }
+        }
+        dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories {
+                google()
+                mavenCentral()
+            }
+        }
+        rootProject.name = "Apple-Launcher"
+        include(":app")
+        EOF
 
-        # AndroidX desteği için gradle.properties kontrolü
-        if [ ! -f "gradle.properties" ]; then
-          echo "android.useAndroidX=true" > gradle.properties
-          echo "kotlin.code.style=official" >> gradle.properties
-        fi
+        # AndroidX desteği için gradle.properties oluştur
+        cat << 'EOF' > gradle.properties
+        android.useAndroidX=true
+        kotlin.code.style=official
+        EOF
 
     - name: JDK 17 Kurulumu
       uses: actions/setup-java@v5
