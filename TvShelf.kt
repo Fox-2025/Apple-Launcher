@@ -20,7 +20,9 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val channelLogo:Boolean=false, val fallbackLogo:Uri?=null, val catalogLogo:Uri?=null, val link:Uri?=null)
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
-    private var generation = 0
+    @Volatile private var generation = 0
+    private val nativeCache=mutableMapOf<String,Pair<Long,List<Item>>>()
+    private val catalogueByProvider=mutableMapOf<String,Pair<Long,List<Item>>>()
     private var selectedPackage: String? = null
     private val statuses = mutableMapOf<String,String>()
     fun status(pkg:String):String = statuses[pkg] ?: "—"
@@ -69,7 +71,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
 
     private fun query(pkg: String): List<Item> {
         val result = linkedSetOf<Item>()
-        for (path in listOf("preview_program", "watch_next_program")) {
+        for (path in listOf("watch_next_program", "preview_program")) {
             runCatching {
                 context.contentResolver.query(Uri.parse("content://android.media.tv/" + path),
                     null, null, null, null)?.use { c ->
@@ -95,15 +97,17 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                             }
                             val link=value("intent_uri")?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
                             if(link!=null) links++
-                            if (result.size < 10)
-                                result.add(Item(value("title").orEmpty(), value("short_description").orEmpty(), art, clip,link=link))
+                            val description=value("short_description").orEmpty()
+                            val resume=path=="watch_next_program" && value("watch_next_type")=="0"
+                            val en=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
+                            if (result.size < 16) result.add(Item(value("title").orEmpty(), if(resume) (if(en) "Continue watching" else "İzlemeye devam et")+" · "+description else description, art, clip,link=link))
                         }
                     }
                     android.util.Log.i("TvShelf", "SOURCE pkg=$pkg table=$path matches=$matching hidden=$hidden usable=$usable links=$links origins=${origins.take(8).joinToString(",")}")
                 } ?: android.util.Log.i("TvShelf", "SOURCE pkg=$pkg table=$path cursor=null")
             }.onFailure { android.util.Log.w("TvShelf", "SOURCE pkg=$pkg table=$path error=${it.javaClass.simpleName}") }
         }
-        return result.toList()
+        return result.distinctBy { it.title to it.link }
     }
 
     private fun normalizeChannel(value:String):String = java.text.Normalizer.normalize(
@@ -137,70 +141,38 @@ internal class TvShelf(private val context: Context, private val texture: Textur
 
     private fun liveChannel(pkg:String):Item? {
         val resolver=context.contentResolver
-        var best:Item?=null
-        var bestTime=Long.MIN_VALUE
-        for(path in listOf("watch_next_program","preview_program")) {
-            runCatching {
-                resolver.query(Uri.parse("content://android.media.tv/"+path),null,null,null,null)?.use { c ->
-                    fun v(col:String):String? { val i=c.getColumnIndex(col); return if(i>=0 && !c.isNull(i)) c.getString(i) else null }
-                    while(c.moveToNext()) {
-                        if(v("package_name")!=pkg || v("browsable")=="0") continue
-                        // A program poster is not a channel logo. Require a tuner channel URI,
-                        // or an exact known Turkish channel name from the live TV provider.
-                        val intentUri=v("intent_uri")?.let { raw -> runCatching {
-                            android.content.Intent.parseUri(raw,android.content.Intent.URI_INTENT_SCHEME).data
-                        }.getOrNull() }
-                        val channelUri=intentUri?.takeIf { android.media.tv.TvContract.isChannelUriForTunerInput(it) }
-                        var name:String?=null
-                        var logo:Uri?=null
-                        var program:String?=null
-                        if(channelUri!=null) {
-                            runCatching {
-                                resolver.query(channelUri,arrayOf("display_name","type"),null,null,null)?.use { channel ->
-                                    if(channel.moveToFirst() && channel.getString(1)!="TYPE_PREVIEW") {
-                                        name=channel.getString(0)
-                                        logo=android.media.tv.TvContract.buildChannelLogoUri(channelUri)
-                                    }
-                                }
-                            }
-                            if(!name.isNullOrBlank()) runCatching {
-                                val now=System.currentTimeMillis()
-                                val current=android.media.tv.TvContract.buildProgramsUriForChannel(channelUri,now,now+1)
-                                resolver.query(current,arrayOf("title","start_time_utc_millis","end_time_utc_millis"),null,null,null)?.use { p ->
-                                    while(p.moveToNext()) if(p.getLong(1)<=now && p.getLong(2)>now) { program=p.getString(0); break }
-                                }
-                            }
-                        }
-                        val candidate=channelCatalog[normalizeChannel(name ?: v("title").orEmpty())]
-                        if(name.isNullOrBlank()) name=candidate?.name
-                        val display=name?.takeIf { it.isNotBlank() } ?: continue
-                        val providerLogo=uri(v("logo_uri"))
-                        val recent=v("last_engagement_time_utc_millis")?.toLongOrNull() ?: 0L
-                        val watched=path=="watch_next_program" && v("watch_next_type")=="0" && recent>0L && recent<=System.currentTimeMillis()
-                        val score=if(watched) recent else 0L
-                        if(score<=bestTime) continue
-                        val english=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
-                        val source=if(watched) { if(english) "Recently watched · Live TV" else "Yakın zamanda izlenen · Canlı TV" }
-                            else { if(english) "Channel suggestion · Live TV" else "Kanal önerisi · Canlı TV" }
-                        if(watched && channelUri!=null && !name.isNullOrBlank()) LiveTuner.remember(context,channelUri)
-                        best=Item(display,if(program.isNullOrBlank()) source else source+"\n"+program,
-                            logo,null,true,candidate?.uri,candidate?.online ?: providerLogo,link=channelUri)
-                        bestTime=score
-                    }
-                }
-            }.onFailure { android.util.Log.w("TvShelf","Live channel metadata unavailable: "+path,it) }
-        }
-        if(best==null) {
-            val u=LiveTuner.channel(context)
-            if(u!=null) runCatching {
-                resolver.query(u,arrayOf("display_name"),null,null,null)?.use { c -> if(c.moveToFirst()) {
-                    val name=c.getString(0).orEmpty(); val candidate=channelCatalog[normalizeChannel(name)]
-                    val en=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
-                    if(name.isNotBlank()) best=Item(name,if(en) "Available TV channel" else "Erişilebilir TV kanalı",android.media.tv.TvContract.buildChannelLogoUri(u),null,true,candidate?.uri,candidate?.online,link=u)
-                } }
+        val u=LiveTuner.channel(context) ?: return null
+        val en=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
+        var name=""
+        runCatching {
+            resolver.query(u,arrayOf("display_name","display_number"),null,null,null)?.use { c ->
+                if(c.moveToFirst()) name=c.getString(0).orEmpty().ifBlank { c.getString(1).orEmpty() }
             }
         }
-        return best
+        if(name.isBlank()) return null
+        val candidate=channelCatalog[normalizeChannel(name)]
+        val now=System.currentTimeMillis()
+        var current:String?=null
+        var next:String?=null
+        var nextAt=Long.MAX_VALUE
+        runCatching {
+            val programs=android.media.tv.TvContract.buildProgramsUriForChannel(u,now,now+12*60*60*1000L)
+            resolver.query(programs,arrayOf("title","start_time_utc_millis","end_time_utc_millis"),null,null,null)?.use { c ->
+                while(c.moveToNext()) {
+                    val title=c.getString(0)?.takeIf { it.isNotBlank() } ?: continue
+                    val start=c.getLong(1); val end=c.getLong(2)
+                    if(start<=now && end>now) current=title
+                    if(start>now && start<nextAt) { next=title; nextAt=start }
+                }
+            }
+        }.onFailure { android.util.Log.i("TvShelf","EPG unavailable "+it.javaClass.simpleName) }
+        val details=mutableListOf<String>()
+        details.add(if(en) "Live TV" else "Canlı TV")
+        current?.let { details.add((if(en) "Now: " else "Şimdi: ")+it) }
+        next?.let { details.add((if(en) "Next: " else "Sırada: ")+java.text.SimpleDateFormat("HH:mm",java.util.Locale.getDefault()).format(java.util.Date(nextAt))+" · "+it) }
+        if(current==null && next==null) details.add(if(en) "Programme information unavailable" else "Yayın bilgisi mevcut değil")
+        android.util.Log.i("TvShelf","EPG current="+(current!=null)+" next="+(next!=null)+" logoCatalog="+(candidate!=null))
+        return Item(name,details.joinToString("\n"),android.media.tv.TvContract.buildChannelLogoUri(u),null,true,candidate?.uri,candidate?.online,link=u)
     }
 
     // Catalogue fallback inspired by Hume Launcher (Apache-2.0).
@@ -210,12 +182,13 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     private var catalogueAt = 0L
     private var catalogueLanguage = ""
     private var catalogueProvider=""
-    private fun todProvider():String? = runCatching {
+    private var todProviderCode:String?=null
+    private fun todProvider():String? = todProviderCode ?: runCatching {
         val conn=URL("https://apis.justwatch.com/content/providers/locale/tr_TR").openConnection().apply { connectTimeout=5000; readTimeout=6000 }
         val arr=org.json.JSONArray(conn.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() })
         for(i in 0 until arr.length()) {
             val obj=arr.getJSONObject(i)
-            if(obj.optString("clear_name").equals("TOD TV",true)) return@runCatching obj.optString("short_name").takeIf { it.matches(Regex("[a-zA-Z0-9_-]{1,24}")) }
+            if(obj.optString("clear_name").equals("TOD TV",true)) return@runCatching obj.optString("short_name").takeIf { it.matches(Regex("[a-zA-Z0-9_-]{1,24}")) }?.also { todProviderCode=it }
         }
         null
     }.getOrNull()
@@ -224,7 +197,8 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val prefs=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE)
         val lang=if(prefs.getString("language","tr")=="en") "en" else "tr"
         val now=android.os.SystemClock.elapsedRealtime()
-        if(catalogueCache.isNotEmpty() && catalogueLanguage==lang && catalogueProvider==provider && now-catalogueAt<30*60*1000L) return catalogueCache
+        val cacheKey=provider+":"+lang
+        catalogueByProvider[cacheKey]?.let { if(now-it.first<30*60*1000L) return it.second }
         val queryText="query NetflixTR(\$country: Country!, \$language: Language!, \$first: Int!, \$filter: TitleFilter) { popularTitles(country: \$country, filter: \$filter, first: \$first, sortBy: POPULAR, sortRandomSeed: 0) { edges { node { content(country: \$country, language: \$language) { title shortDescription backdrops { backdropUrl } } offers(country: \$country, platform: WEB) { standardWebURL package { technicalName } } } } } }"
         val groups=mutableListOf<List<Item>>()
         for(kind in listOf("MOVIE","SHOW")) {
@@ -263,9 +237,11 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                         val offers=node.optJSONArray("offers")
                         if(offers!=null) for(j in 0 until offers.length()) {
                             val offer=offers.optJSONObject(j) ?: continue
-                            if(tod || offer.optJSONObject("package")?.optString("technicalName")!="netflix") continue
                             val candidate=Uri.parse(offer.optString("standardWebURL"))
-                            if(candidate.scheme=="https" && candidate.host in setOf("www.netflix.com","netflix.com")) { link=candidate; break }
+                            val host=candidate.host?.lowercase(java.util.Locale.ROOT)
+                            val technical=offer.optJSONObject("package")?.optString("technicalName").orEmpty()
+                            val trusted=if(tod) host in setOf("todtv.com.tr","www.todtv.com.tr","todtv.com","www.todtv.com") else technical=="netflix" && host in setOf("www.netflix.com","netflix.com")
+                            if(candidate.scheme=="https" && trusted && !candidate.path.isNullOrBlank() && candidate.path!="/") { link=candidate; break }
                         }
                         val credit=if(tod) "TOD TV · JustWatch" else if(lang=="tr") "Netflix Türkiye · JustWatch" else "Netflix Turkey · JustWatch"
                         val desc=content.optString("shortDescription").takeUnless { it=="null" }.orEmpty()
@@ -280,7 +256,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         for(i in 0 until 12) for(group in groups) group.getOrNull(i)?.let { mixed.add(it) }
         val result=mixed.distinctBy { it.title }.take(16)
         if(result.isNotEmpty()) {
-            catalogueCache=result; catalogueAt=now; catalogueLanguage=lang; catalogueProvider=provider
+            catalogueByProvider[cacheKey]=now to result
         }
         return result
     }
@@ -319,7 +295,11 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val ticket = generation
         main.postDelayed({
             if (ticket == generation && active) worker.execute {
-                val native=if(liveTv) listOfNotNull(liveChannel(pkg)) else query(pkg)
+                if(ticket!=generation) return@execute
+                val now=android.os.SystemClock.elapsedRealtime()
+                val cached=nativeCache[pkg]?.takeIf { !liveTv && now-it.first<60000L }?.second
+                val native=if(liveTv) listOfNotNull(liveChannel(pkg)) else cached ?: query(pkg).also { nativeCache[pkg]=now to it }
+                if(ticket!=generation) return@execute
                 val netflix=pkg in setOf("com.netflix.ninja","com.netflix.mediaclient")
                 val tod=pkg in setOf("com.beonetv.tod","com.digiturk.tod","com.digiturk.tod.mobil","com.todtv.tod","com.digiturk.iq.mobil")
                 val fallback=(netflix || tod) && native.isEmpty()
@@ -358,6 +338,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         video = item.video
         onItem(item, null)
         worker.execute {
+            if(ticket!=generation) return@execute
             val bitmap = item.image?.let { load(it) } ?: item.fallbackLogo?.let { load(it) } ?: item.catalogLogo?.let { load(it) }
             main.post {
                 if (ticket != generation || !active) bitmap?.recycle()
@@ -370,7 +351,8 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                             ready = true
                             startVideo()
                         }
-                    }, if (bitmap != null) 5000L else 0L)
+                    }, if (bitmap != null) 3500L else 0L)
+                    if(item.channelLogo) main.postDelayed({ if(ticket==generation && active) selectedPackage?.let { select(it,true) } },60000L)
                     main.postDelayed({
                         if (ticket == generation && active && items.size > 1) next(1)
                     }, if (item.video != null) 35000L else context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getInt("shelf_seconds",9).coerceIn(6,20)*1000L)
@@ -408,7 +390,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val remote=uri.scheme=="https"
         val cache=if(remote) java.io.File(cacheDir,java.security.MessageDigest.getInstance("SHA-256").digest((limit.toString()+":"+uri.toString()).toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }+".img") else null
         if(cache!=null && cache.isFile && System.currentTimeMillis()-cache.lastModified() in 0..604800000L) {
-            BitmapFactory.decodeFile(cache.absolutePath)?.let { return@runCatching it }
+            BitmapFactory.decodeFile(cache.absolutePath)?.let { cache.setLastModified(System.currentTimeMillis()); return@runCatching it }
         }
         val stream = if (uri.scheme == "https") URL(uri.toString()).openConnection().apply {
             connectTimeout = 5000
@@ -485,9 +467,9 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         if (w <= 0 || h <= 0 || vw <= 0 || vh <= 0) return
         val area=previewBounds ?: return
         if(area.width()<=0 || area.height()<=0) return
-        val factor=maxOf(w/vw,h/vh)
+        val factor=if(area.top>0) minOf(area.width().toFloat()/vw,area.height().toFloat()/vh) else maxOf(w/vw,h/vh)
         val dw=vw*factor; val dh=vh*factor
-        texture.setTransform(Matrix().apply { setScale(dw/w,dh/h); postTranslate((w-dw)/2,if(area.top>0) area.top.toFloat() else (h-dh)/2) })
+        texture.setTransform(Matrix().apply { setScale(dw/w,dh/h); postTranslate((w-dw)/2,area.top+(area.height()-dh)/2) })
     }
 
     private fun releasePlayer() {
