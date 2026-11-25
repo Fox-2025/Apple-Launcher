@@ -20,6 +20,10 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var generation = 0
+    private var selectedPackage: String? = null
+    private val statuses = mutableMapOf<String,String>()
+    fun status(pkg:String):String = statuses[pkg] ?: "—"
+    private fun record(value:String) { selectedPackage?.let { statuses[it]=value } }
     private var player: MediaPlayer? = null
     private var surface: Surface? = null
     private var video: Uri? = null
@@ -83,6 +87,8 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         stop()
         if (pkg.isNullOrBlank()) return
         active = true
+        selectedPackage=pkg
+        record("…")
         val ticket = generation
         main.postDelayed({
             if (ticket == generation && active) worker.execute {
@@ -91,6 +97,9 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                     if (ticket == generation && active) {
                         items = result
                         available = result.isNotEmpty()
+                        val images=result.count { it.image!=null }
+                        val videos=result.count { it.video!=null }
+                        record("IMG: $images  VID: $videos")
                         if (available) show(0) else onItem(null, null)
                     }
                 }
@@ -181,7 +190,10 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                 }
             }
             mp.setOnInfoListener { p, what, _ ->
-                if (player === p && what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) texture.alpha = 1f
+                if (player === p && what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                    texture.alpha = 1f
+                    record("IMG: "+items.count { it.image!=null }+"  VID: "+items.count { it.video!=null }+"  ▶")
+                }
                 false
             }
             mp.setOnCompletionListener { if (active && player === it && items.size > 1) next(1) }
@@ -210,6 +222,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
 
     fun stop() {
         generation++
+        selectedPackage=null
         active = false
         expanded = false
         available = false
