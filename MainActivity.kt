@@ -96,6 +96,19 @@ class MainActivity : Activity() {
         selectedId = savedInstanceState?.getString("selected")
         buildHome()
         fetchStoreIcons()
+        if (checkSelfPermission("android.permission.READ_TV_LISTINGS") != android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            !prefs.getBoolean("tv_listing_permission_requested", false)) {
+            prefs.edit().putBoolean("tv_listing_permission_requested", true).apply()
+            runCatching { requestPermissions(arrayOf("android.permission.READ_TV_LISTINGS"), 230) }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 230 && ::shelfPlayer.isInitialized) {
+            shelfKey = null
+            updateShelf(apps.firstOrNull { it.id == selectedId })
+        }
     }
 
     override fun onResume() {
