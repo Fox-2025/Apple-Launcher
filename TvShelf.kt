@@ -159,13 +159,36 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                         val source=if(watched) { if(english) "Recently watched · Live TV" else "Yakın zamanda izlenen · Canlı TV" }
                             else { if(english) "Channel suggestion · Live TV" else "Kanal önerisi · Canlı TV" }
                         best=Item(display,if(program.isNullOrBlank()) source else source+"\n"+program,
-                            logo,null,true,providerLogo,candidate?.uri)
+                            logo,null,true,candidate?.uri,providerLogo)
                         bestTime=score
                     }
                 }
             }.onFailure { android.util.Log.w("TvShelf","Live channel metadata unavailable: "+path,it) }
         }
         return best
+    }
+
+    private fun netflixCatalog():List<Item> {
+        val prefs=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE)
+        val key=prefs.getString("tmdb_api_key","").orEmpty().trim()
+        if(key.isBlank()) return emptyList()
+        val lang=if(prefs.getString("language","tr")=="en") "en-US" else "tr-TR"
+        val list=mutableListOf<Item>()
+        for(type in listOf("movie","tv")) {
+            runCatching {
+                val url="https://api.themoviedb.org/3/discover/"+type+"?watch_region=TR&with_watch_providers=8&with_watch_monetization_types=flatrate&include_adult=false&sort_by=popularity.desc&language="+lang+"&api_key="+java.net.URLEncoder.encode(key,"UTF-8")
+                val connection=URL(url).openConnection().apply { connectTimeout=5000; readTimeout=6000 }
+                val arr=org.json.JSONObject(connection.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() }).optJSONArray("results")
+                if(arr!=null) for(i in 0 until minOf(arr.length(),12)) {
+                    val obj=arr.optJSONObject(i) ?: continue
+                    val art=obj.optString("backdrop_path").takeIf { it.startsWith("/") && it.length>4 } ?: continue
+                    val title=obj.optString(if(type=="tv") "name" else "title").takeIf { it.isNotBlank() } ?: continue
+                    val credit=if(lang=="tr-TR") "Netflix Türkiye kataloğu · TMDB / JustWatch" else "Netflix Turkey catalog · TMDB / JustWatch"
+                    list.add(Item(title,credit,Uri.parse("https://image.tmdb.org/t/p/w1280"+art),null))
+                }
+            }.onFailure { android.util.Log.w("TvShelf","Netflix catalog unavailable: "+type) }
+        }
+        return list.distinctBy { it.title }.take(16)
     }
 
     fun select(pkg: String?, liveTv:Boolean=false) {
@@ -177,14 +200,17 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val ticket = generation
         main.postDelayed({
             if (ticket == generation && active) worker.execute {
-                val result = if(liveTv) listOfNotNull(liveChannel(pkg)) else query(pkg)
+                val native=if(liveTv) listOfNotNull(liveChannel(pkg)) else query(pkg)
+                val netflix=pkg in setOf("com.netflix.ninja","com.netflix.mediaclient")
+                val fallback=netflix && native.isEmpty()
+                val result=if(fallback) netflixCatalog() else native
                 main.post {
                     if (ticket == generation && active) {
                         items = result
                         available = result.isNotEmpty()
                         val images=result.count { it.image!=null }
                         val videos=result.count { it.video!=null }
-                        record(if(liveTv) (if(result.isEmpty()) "Kanal bilgisi yok" else "Kanal: "+result.first().title) else "IMG: $images  VID: $videos")
+                        record(if(liveTv) (if(result.isEmpty()) "Kanal bilgisi yok" else "Kanal: "+result.first().title) else if(fallback) (if(result.isEmpty()) "Netflix: TMDB anahtarı / veri yok" else "TMDB · IMG: $images") else "IMG: $images  VID: $videos")
                         if (available) show(0) else onItem(null, null)
                     }
                 }
@@ -232,6 +258,12 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     }
 
     private fun load(uri: Uri): Bitmap? = runCatching {
+        val cacheDir=java.io.File(context.cacheDir,"shelf-images").apply { mkdirs() }
+        val remote=uri.scheme=="https"
+        val cache=if(remote) java.io.File(cacheDir,java.security.MessageDigest.getInstance("SHA-256").digest(uri.toString().toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }+".img") else null
+        if(cache!=null && cache.isFile && System.currentTimeMillis()-cache.lastModified() in 0..604800000L) {
+            BitmapFactory.decodeFile(cache.absolutePath)?.let { return@runCatching it }
+        }
         val stream = if (uri.scheme == "https") URL(uri.toString()).openConnection().apply {
             connectTimeout = 5000
             readTimeout = 6000
@@ -252,7 +284,14 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
         var sample = 1
         while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2160) sample *= 2
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        val bitmap=BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        if(bitmap!=null && cache!=null) runCatching {
+            cache.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG,100,it) }
+            val entries=cacheDir.listFiles().orEmpty().sortedBy { it.lastModified() }
+            var total=entries.sumOf { it.length() }
+            for(file in entries) { if(total<=64L*1024*1024) break; val size=file.length(); if(file.delete()) total-=size }
+        }
+        bitmap
     }.getOrNull()
 
     private fun startVideo() {
