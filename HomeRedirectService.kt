@@ -14,11 +14,12 @@ class HomeRedirectService : AccessibilityService() {
     private var lastRedirect = 0L
     override fun onServiceConnected() {
         super.onServiceConnected()
+        connected=true
         val config = serviceInfo
         config.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
         config.packageNames = STOCK_HOME.toTypedArray()
         config.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-        config.notificationTimeout = 100
+        config.notificationTimeout = 0
         serviceInfo = config
     }
 
@@ -31,16 +32,20 @@ class HomeRedirectService : AccessibilityService() {
         val name = cls.substringAfterLast('.')
         if (name !in setOf("HomeActivity","MainActivity","LauncherActivity","TvLauncherActivity")) return
         val now = SystemClock.uptimeMillis()
-        if (now - lastRedirect < 1200L) return
+        if (now - lastRedirect < 350L) return
         lastRedirect = now
         runCatching {
             startActivity(Intent(this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
-        }
+        }.onFailure { android.util.Log.w("HomeRedirectService","Home redirect failed",it) }
     }
 
+    override fun onDestroy() { connected=false; super.onDestroy() }
+    override fun onUnbind(intent: Intent?): Boolean { connected=false; return super.onUnbind(intent) }
     override fun onInterrupt() {}
     companion object {
+        @Volatile var connected=false
+            private set
         private val STOCK_HOME = setOf("com.google.android.apps.tv.launcherx","com.google.android.tvlauncher")
     }
 }
