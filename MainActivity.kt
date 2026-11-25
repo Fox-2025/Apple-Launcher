@@ -46,10 +46,19 @@ class MainActivity : Activity() {
         private val paint=android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
         override fun dispatchDraw(canvas:Canvas) {
             if(!soften() || width<=0 || height<=0) { snapshot=null; super.dispatchDraw(canvas); return }
-            val w=maxOf(1,width/5); val h=maxOf(1,height/5)
+            val w=maxOf(1,width/2); val h=maxOf(1,height/2)
             val b=snapshot?.takeIf { it.width==w && it.height==h } ?: runCatching {
                 Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also {
                     val c=Canvas(it); c.scale(w.toFloat()/width,h.toFloat()/height); super.dispatchDraw(c); snapshot=it
+                    // A subtle 1-pixel filter at half resolution, preserving artwork geometry.
+                    val p=IntArray(w*h); it.getPixels(p,0,w,0,0,w,h)
+                    val q=p.copyOf()
+                    for(y in 1 until h-1) for(x in 1 until w-1) {
+                        val k=y*w+x; val a=p[k-1]; val b=p[k]; val d=p[k+1]; val e=p[k-w]; val g=p[k+w]
+                        fun avg(shift:Int)=(((a ushr shift and 255)+(b ushr shift and 255)*4+(d ushr shift and 255)+(e ushr shift and 255)+(g ushr shift and 255))/8)
+                        q[k]=(avg(24) shl 24) or (avg(16) shl 16) or (avg(8) shl 8) or avg(0)
+                    }
+                    it.setPixels(q,0,w,0,0,w,h)
                 }
             }.getOrNull()
             if(b==null) super.dispatchDraw(canvas) else canvas.drawBitmap(b,null,android.graphics.Rect(0,0,width,height),paint)
@@ -57,7 +66,17 @@ class MainActivity : Activity() {
     }
     private fun focusBorder(selected:Boolean):Drawable? {
         if(!selected) return null
-        return android.graphics.drawable.LayerDrawable(arrayOf(rounded(Color.TRANSPARENT,13,0xff151b25.toInt(),4),rounded(Color.TRANSPARENT,13,Color.WHITE,2))).apply { setLayerInset(1,dp(1),dp(1),dp(1),dp(1)) }
+        return object:Drawable() {
+            private val p=Paint(Paint.ANTI_ALIAS_FLAG).apply { style=Paint.Style.STROKE }
+            override fun draw(c:Canvas) {
+                val rect=RectF(bounds).apply { inset(dp(3).toFloat(),dp(3).toFloat()) }
+                p.color=0xff10141c.toInt(); p.strokeWidth=dp(6).toFloat(); c.drawRoundRect(rect,dp(11).toFloat(),dp(11).toFloat(),p)
+                p.color=Color.WHITE; p.strokeWidth=dp(2).toFloat(); c.drawRoundRect(rect,dp(11).toFloat(),dp(11).toFloat(),p)
+            }
+            override fun setAlpha(alpha:Int) { p.alpha=alpha }
+            override fun setColorFilter(filter:ColorFilter?) { p.colorFilter=filter }
+            override fun getOpacity()=PixelFormat.TRANSLUCENT
+        }
     }
     private var shelfKey: String? = null
     private var resumed = false
@@ -379,21 +398,6 @@ class MainActivity : Activity() {
                     title.take(1).uppercase(), launch, icon, banner)
             }
         }
-        runCatching {
-            val manager=tvInputs
-            if(manager!=null) for(input in manager.tvInputList) {
-                if(input.type!=android.media.tv.TvInputInfo.TYPE_HDMI || !input.isPassthroughInput) continue
-                val state=manager.getInputState(input.id)
-                if(state==android.media.tv.TvInputManager.INPUT_STATE_DISCONNECTED) continue
-                val label=input.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() }
-                    ?: input.loadLabel(this).toString().takeIf { it.isNotBlank() }
-                    ?: "HDMI"
-                val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(input.id)
-                val intent=Intent(Intent.ACTION_VIEW,uri)
-                val id="hdmi:"+input.id
-                result[id]=Tile(id,label,if(state==android.media.tv.TvInputManager.INPUT_STATE_CONNECTED) t("HDMI • Bağlı","HDMI • Connected") else t("HDMI • Beklemede","HDMI • Standby"),0xff25344e.toInt(),"HDMI",intent)
-            }
-        }
         val sourceApp=result.values.firstOrNull { defaultRank(it)==6 }
         if(sourceApp!=null) result.remove(sourceApp.id)
         result["builtin:source"]=Tile("builtin:source","Source",t("TV girişlerini seç","Choose TV input"),0xff25344e.toInt(),"HDMI",sourceApp?.launch,sourceApp?.icon,sourceApp?.banner)
@@ -602,7 +606,7 @@ class MainActivity : Activity() {
 
     private fun tiles(): List<Tile> {
         val ranks=moveOrder ?: if(prefs.getBoolean("custom_app_order",false)) order else null
-        val available=apps.filter { showHidden || it.id !in hidden }
+        val available=apps.filter { !it.id.startsWith("hdmi:") && (it.id=="builtin:source" || showHidden || it.id !in hidden) }
         if(ranks==null) {
             val picked=mutableSetOf<String>()
             val primary=(0..11).mapNotNull { rank -> available.firstOrNull { defaultRank(it)==rank && picked.add(it.id) } }
@@ -616,7 +620,7 @@ class MainActivity : Activity() {
     }
 
     private fun beginMove(tile: Tile) {
-        val snapshot=runCatching { glassSource.frame()?.bitmap?.let { b -> Bitmap.createScaledBitmap(b,maxOf(1,b.width/3),maxOf(1,b.height/3),true) } }.getOrNull()
+        val snapshot=runCatching { glassSource.frame()?.bitmap?.let { b -> Bitmap.createScaledBitmap(b,maxOf(1,b.width/2),maxOf(1,b.height/2),true) } }.getOrNull()
         moveBackdrop.setImageBitmap(snapshot)
         shelfPlayer.stop(); shelfKey=null
         movingId = tile.id
@@ -749,7 +753,7 @@ class MainActivity : Activity() {
             clipToPadding = false
         }
         val frame = FrameLayout(this).apply { setBackgroundColor(bg()) }
-        backdropImage = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+        backdropImage = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
         frame.addView(backdropImage, FrameLayout.LayoutParams(-1, -1))
         videoSurface = android.view.TextureView(this)
         frame.addView(videoSurface,FrameLayout.LayoutParams(-1,-1))
@@ -958,7 +962,10 @@ class MainActivity : Activity() {
         val downloaded = artwork(tile)
         val systemSettings = tile.id in setOf("com.android.tv.settings","com.android.settings","com.google.android.tv.settings") ||
             tile.title.lowercase() in setOf("settings","ayarlar","tv settings","tv ayarları")
-        if(systemSettings && !asset(tile,"custom").isFile) {
+        if(tile.id=="builtin:source") {
+            panel.background=GradientDrawable(GradientDrawable.Orientation.TL_BR,intArrayOf(0xff45617c.toInt(),0xff182735.toInt())).apply { cornerRadius=dp(13).toFloat() }
+            panel.addView(ImageView(this).apply { setImageDrawable(SourceGlyph("source")); scaleType=ImageView.ScaleType.FIT_CENTER; setPadding(dp(14),dp(9),dp(14),dp(9)) },FrameLayout.LayoutParams(-1,-1))
+        } else if(systemSettings && !asset(tile,"custom").isFile) {
             panel.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0xff9da3ae.toInt(),0xff555c67.toInt())).apply { cornerRadius=dp(13).toFloat() }
             val image=ImageView(this).apply { setImageDrawable(SettingsGear(Color.WHITE)); scaleType=ImageView.ScaleType.FIT_CENTER; setPadding(dp(10),dp(8),dp(10),dp(8)) }
             panel.addView(image,FrameLayout.LayoutParams(-1,-1))
@@ -993,12 +1000,12 @@ class MainActivity : Activity() {
             setPadding(0,dp(7),0,dp(2))
         }
         holder.addView(label, LinearLayout.LayoutParams(-1,-2))
-        holder.setOnClickListener { if(movingId != null) finishMove(true) else launch(tile) }
+        holder.setOnClickListener { if(movingId != null) finishMove(true) else { holder.animate().scaleX(1.02f).scaleY(1.02f).setDuration(75).withEndAction { if(holder.hasFocus()) holder.animate().scaleX(1.10f).scaleY(1.10f).setDuration(120).start(); launch(tile) }.start() } }
         holder.setOnLongClickListener { if(movingId == null) edit(tile); true }
         holder.setOnFocusChangeListener { view, focus ->
             val lifted=if(movingId!=null) movingId==tile.id else focus
-            val scale=if(lifted) (if(movingId!=null) 1.05f else 1.07f) else 1f
-            view.animate().scaleX(scale).scaleY(scale).setDuration(200).start()
+            val scale=if(lifted) (if(movingId!=null) 1.07f else 1.10f) else 1f
+            view.animate().cancel(); view.animate().scaleX(scale).scaleY(scale).setInterpolator(android.view.animation.DecelerateInterpolator(1.6f)).setDuration(210).start()
             view.translationZ = if(lifted) dp(10).toFloat() else 0f
             panel.elevation = if(lifted) dp(8).toFloat() else dp(3).toFloat()
             border.background = focusBorder(lifted)
@@ -1037,39 +1044,73 @@ class MainActivity : Activity() {
         glassSource.invalidate()
     }
 
+    private class SourceGlyph(private val kind:String):Drawable() {
+        private val p=Paint(Paint.ANTI_ALIAS_FLAG).apply { color=Color.WHITE; style=Paint.Style.STROKE; strokeWidth=2.5f; strokeCap=Paint.Cap.ROUND; strokeJoin=Paint.Join.ROUND }
+        override fun draw(c:Canvas) {
+            val b=bounds; val size=minOf(b.width(),b.height()).toFloat()
+            c.save(); c.translate(b.exactCenterX()-size/2,b.exactCenterY()-size/2); c.scale(size/64,size/64)
+            if(kind=="hdmi") {
+                val path=Path().apply { moveTo(12f,18f); lineTo(52f,18f); lineTo(52f,36f); lineTo(43f,45f); lineTo(21f,45f); lineTo(12f,36f); close() }; c.drawPath(path,p)
+                for(x in 20..44 step 6) c.drawLine(x.toFloat(),25f,x.toFloat(),31f,p)
+            } else {
+                c.drawRoundRect(8f,12f,56f,48f,4f,4f,p)
+                if(kind=="tv") { c.drawLine(24f,55f,40f,55f,p); c.drawLine(32f,48f,32f,55f,p) }
+                else { c.drawLine(2f,30f,38f,30f,p); c.drawLine(29f,21f,38f,30f,p); c.drawLine(29f,39f,38f,30f,p) }
+            }
+            c.restore()
+        }
+        override fun setAlpha(a:Int) { p.alpha=a }
+        override fun setColorFilter(f:ColorFilter?) { p.colorFilter=f }
+        override fun getOpacity()=PixelFormat.TRANSLUCENT
+    }
+
     private fun sourceMenu(tile:Tile) {
-        val inputs=runCatching {
-            tvInputs?.tvInputList.orEmpty().filter { it.isPassthroughInput }.sortedBy { it.loadLabel(this).toString() }
-        }.getOrDefault(emptyList())
-        val labels=inputs.map { input ->
+        val inputs=runCatching { tvInputs?.tvInputList.orEmpty().filter { it.isPassthroughInput }.sortedBy { it.loadLabel(this).toString() } }.getOrDefault(emptyList())
+        val (dialog,body,items)=newGlassDialog(t("Kaynaklar","Sources"))
+        items.addView(text(t("TV girişini seç","Choose a TV input"),14f,0xffc3d0df.toInt()).apply { setPadding(dp(10),0,0,dp(12)) })
+        data class Entry(val title:String,val subtitle:String,val kind:String,val action:()->Unit)
+        val entries=mutableListOf<Entry>()
+        entries.add(Entry(t("Canlı TV","Live TV"),t("Anten / Uydu","Antenna / Satellite"),"tv") { if(!LiveTuner.open(this)) Toast.makeText(this,t("Kanal bilgisi alınamadı","Channel information unavailable"),Toast.LENGTH_SHORT).show() })
+        for(input in inputs) {
             val name=runCatching { input.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() } ?: input.loadLabel(this).toString() }.getOrDefault(input.id)
             val state=runCatching { tvInputs?.getInputState(input.id) }.getOrNull()
-            val connection=when(state) {
-                android.media.tv.TvInputManager.INPUT_STATE_CONNECTED -> t("Bağlı","Connected")
+            val status=when(state) {
+                android.media.tv.TvInputManager.INPUT_STATE_CONNECTED -> t("● Bağlı","● Connected")
                 android.media.tv.TvInputManager.INPUT_STATE_CONNECTED_STANDBY -> t("Beklemede","Standby")
-                android.media.tv.TvInputManager.INPUT_STATE_DISCONNECTED -> t("Bağlı değil","Disconnected")
-                else -> t("Durum bilinmiyor","Unknown")
+                else -> t("Bağlı değil","Disconnected")
             }
-            name+" · "+connection
-        }
-        val actions=listOf(t("Canlı TV","Live TV"))+labels+listOf(t("TV kaynak seçicisini aç","Open TV source selector"))
-        glassMenu("Source",actions.toTypedArray()) { index ->
-            if(index==0) { apps.firstOrNull { defaultRank(it)==0 }?.let { launch(it) }; return@glassMenu }
-            if(index<=inputs.size) {
-                val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(inputs[index-1].id)
+            entries.add(Entry(name,status,if(input.type==android.media.tv.TvInputInfo.TYPE_HDMI) "hdmi" else "source") {
+                val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(input.id)
                 val intent=Intent(Intent.ACTION_VIEW,uri)
-                val tcl=Intent(intent).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")
-                val launched=runCatching { startActivity(tcl); true }.getOrElse {
-                    runCatching { startActivity(intent); true }.getOrDefault(false)
-                }
-                if(launched) rememberOpened(tile)
-                if(!launched) Toast.makeText(this,t("Bu TV girişi doğrudan açılamıyor.","This TV input cannot be opened directly."),Toast.LENGTH_LONG).show()
-            } else {
-                val original=tile.launch
-                if(original==null || !runCatching { startActivity(original); true }.getOrDefault(false))
-                    Toast.makeText(this,t("TV kaynak seçicisi erişilebilir değil. Kumandadaki Source tuşunu kullan.","TV source selector unavailable. Use the remote Source button."),Toast.LENGTH_LONG).show()
-            }
+                val launched=runCatching { startActivity(Intent(intent).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")); true }.getOrElse { runCatching { startActivity(intent); true }.getOrDefault(false) }
+                if(launched) rememberOpened(tile) else Toast.makeText(this,t("Giriş açılamadı","Input unavailable"),Toast.LENGTH_SHORT).show()
+            })
         }
+        entries.add(Entry(t("TV kaynak seçici","TV source selector"),t("Sistem menüsü","System menu"),"source") {
+            if(tile.launch==null || !runCatching { startActivity(tile.launch); true }.getOrDefault(false)) Toast.makeText(this,t("Kumandadaki Source tuşunu kullan","Use the remote Source button"),Toast.LENGTH_SHORT).show()
+        })
+        var first:View?=null
+        for(group in entries.chunked(2)) {
+            val row=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; clipChildren=false; clipToPadding=false }
+            for(entry in group) {
+                val card=LinearLayout(this).apply {
+                    orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER; isFocusable=true; isClickable=true
+                    setPadding(dp(7),dp(9),dp(7),dp(9)); background=LiquidGlassDrawable(this,glassSource,dp(18).toFloat(),dark=true)
+                    addView(ImageView(this@MainActivity).apply { setImageDrawable(SourceGlyph(entry.kind)) },LinearLayout.LayoutParams(dp(44),dp(44)))
+                    addView(text(entry.title,16f,Color.WHITE,true).apply { gravity=Gravity.CENTER; maxLines=2 })
+                    addView(text(entry.subtitle,11f,0xffc3d0df.toInt()).apply { gravity=Gravity.CENTER; maxLines=2 })
+                    setOnFocusChangeListener { v,f -> v.background=LiquidGlassDrawable(v,glassSource,dp(18).toFloat(),focused=f,dark=true); v.foreground=focusBorder(f); v.animate().scaleX(if(f)1.04f else 1f).scaleY(if(f)1.04f else 1f).setDuration(180).start() }
+                    setOnClickListener { dialog.dismiss(); entry.action() }
+                }
+                row.addView(card,LinearLayout.LayoutParams(0,dp(108),1f).apply { setMargins(dp(5),dp(5),dp(5),dp(5)) })
+                if(first==null) first=card
+            }
+            if(group.size==1) row.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
+            items.addView(row)
+        }
+        presentGlass(dialog)
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels*.56f).roundToInt(),(resources.displayMetrics.heightPixels*.85f).roundToInt())
+        first?.requestFocus()
     }
 
     private fun rememberOpened(tile:Tile) { lastOpenedId=tile.id; prefs.edit().putString("last_opened_tile",tile.id).apply() }
