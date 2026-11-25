@@ -1075,15 +1075,44 @@ class MainActivity : Activity() {
         glassMenu(t("Uygulamalar","Applications"),arrayOf(
             if(showHidden) t("Gizli uygulamaları gizle","Hide hidden apps") else t("Gizli uygulamaları göster","Show hidden apps"),
             if(storeIcons) t("Apple TV ikonlarını kapat","Disable Apple TV icons") else t("Apple TV ikonlarını aç","Enable Apple TV icons"),
-            t("Uygulamaları yenile","Refresh apps"),t("Varsayılan sıralamayı geri yükle","Restore default layout")),onBack={showSettings()}) { choice ->
+            t("Uygulamaları yenile","Refresh apps"),t("Varsayılan sıralamayı geri yükle","Restore default layout"),t("Netflix katalog ayarları","Netflix catalog settings")),onBack={showSettings()}) { choice ->
             when(choice) {
                 0 -> { showHidden=!showHidden; refreshCards() }
                 1 -> { storeIcons=!storeIcons; save(); refreshCards(); fetchStoreIcons() }
                 2 -> { apps=installed(); refreshCards(); fetchStoreIcons() }
                 3 -> { order.clear(); prefs.edit().putBoolean("custom_app_order",false).apply(); save(); refreshCards() }
+                4 -> { netflixSettings(); return@glassMenu }
             }
             applicationSettings()
         }
+    }
+    private fun netflixSettings() {
+        val (dialog,_,items)=newGlassDialog(t("Netflix katalog ayarları","Netflix catalog settings"))
+        val explanation=text(t("Türkiye kataloğu için TMDB API v3 anahtarı. Netflix hesabı gerekmez. Katalog verisi kişisel izleme geçmişi değildir.","TMDB API v3 key for the Turkey catalog. No Netflix account needed. Catalog data is not your viewing history."),16f,Color.WHITE,false)
+        items.addView(explanation)
+        val field=EditText(this).apply {
+            hint="TMDB API key (v3)"
+            setText(prefs.getString("tmdb_api_key",""))
+            inputType=android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(0xffbbbbbb.toInt())
+            background=glass(false,15)
+        }
+        items.addView(field,LinearLayout.LayoutParams(-1,-2))
+        items.addView(menuRow(t("Kaydet","Save")) {
+            val key=field.text.toString().trim()
+            if(key.isEmpty()) prefs.edit().remove("tmdb_api_key").apply()
+            else prefs.edit().putString("tmdb_api_key",key).apply()
+            dialog.dismiss(); shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }); applicationSettings()
+        })
+        items.addView(menuRow(t("Anahtarı kaldır","Remove key")) {
+            prefs.edit().remove("tmdb_api_key").apply()
+            dialog.dismiss(); shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }); applicationSettings()
+        })
+        items.addView(text("This product uses the TMDB API but is not endorsed or certified by TMDB. Watch availability: JustWatch.",13f,Color.WHITE,false))
+        dialog.setOnCancelListener { dialog.dismiss(); applicationSettings() }
+        presentGlass(dialog)
     }
     private fun homeSettings() {
         val home=Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
@@ -1102,7 +1131,7 @@ class MainActivity : Activity() {
             t("Varsayılan: ","Default: ")+status,
             "HOME role: "+if(roleHeld) t("verildi","granted") else t("verilmedi","not granted"),
             t("Varsayılan başlatıcı seç","Choose default launcher"),
-            t("Yardımcı: ","Helper: ")+if(helper) t("etkin","enabled") else t("kapalı","disabled"),
+            t("Yardımcı: ","Helper: ")+when { HomeRedirectService.connected -> t("bağlı","connected"); helper -> t("etkin, bağlantı yok","enabled, not connected"); else -> t("kapalı","disabled") },
             t("Erişilebilirlik / ADB kurulum rehberi","Accessibility / ADB setup guide"),
             "Android "+android.os.Build.VERSION.RELEASE+" • SDK "+android.os.Build.VERSION.SDK_INT),
             onBack={showSettings()}) { choice ->
