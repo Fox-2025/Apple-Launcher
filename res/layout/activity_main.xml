@@ -21,7 +21,7 @@
         android:padding="16dp"
         android:gravity="top|center_horizontal">
 
-        <com.tvos.launcher.AspectFrame
+        <FrameLayout
             android:id="@+id/shelfTitle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -35,7 +35,10 @@
             android:textColor="@color/white"
             android:textSize="14sp"
             android:background="@drawable/bg_toggle"
-            android:padding="8dp 16dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
             android:visibility="gone" />
     </LinearLayout>
 
