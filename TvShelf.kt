@@ -16,7 +16,8 @@ import java.util.concurrent.Executors
 
 internal class TvShelf(private val context: Context, private val texture: TextureView,
     private val onItem: (Item?, Bitmap?) -> Unit) {
-    data class Item(val title: String, val description: String, val image: Uri?, val video: Uri?)
+    data class Item(val title: String, val description: String, val image: Uri?, val video: Uri?,
+        val channelLogo:Boolean=false, val fallbackLogo:Uri?=null, val catalogLogo:Uri?=null)
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var generation = 0
@@ -83,7 +84,91 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         return result.toList()
     }
 
-    fun select(pkg: String?) {
+    private fun normalizeChannel(value:String):String = java.text.Normalizer.normalize(
+        value.lowercase(java.util.Locale.ROOT),java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"),"").replace('ı','i').trim()
+        .replace(Regex("(?i)(?:\\s|[-_])+(?:fhd|uhd|hd|sd|4k)$"),"")
+        .replace(Regex("[^a-z0-9+]"),"")
+
+    private data class ChannelLogo(val name:String,val uri:Uri)
+    private val channelCatalog by lazy {
+        val entries=linkedMapOf<String,ChannelLogo>()
+        runCatching {
+            val array=org.json.JSONArray(context.assets.open("turkish_channel_logos.json").bufferedReader(Charsets.UTF_8).use { it.readText() })
+            for(i in 0 until array.length()) {
+                val row=array.getJSONObject(i)
+                val name=row.getString("name")
+                val image=uri(row.optString("url")) ?: continue
+                val aliases=row.optJSONArray("aliases")
+                val names=mutableListOf(name)
+                if(aliases!=null) for(j in 0 until aliases.length()) names.add(aliases.optString(j))
+                for(alias in names) {
+                    val key=normalizeChannel(alias)
+                    if(key.length>=2) entries.putIfAbsent(key,ChannelLogo(name,image))
+                }
+            }
+        }
+        entries
+    }
+
+    private fun liveChannel(pkg:String):Item? {
+        val resolver=context.contentResolver
+        var best:Item?=null
+        var bestTime=Long.MIN_VALUE
+        for(path in listOf("watch_next_program","preview_program")) {
+            runCatching {
+                resolver.query(Uri.parse("content://android.media.tv/"+path),null,null,null,null)?.use { c ->
+                    fun v(col:String):String? { val i=c.getColumnIndex(col); return if(i>=0 && !c.isNull(i)) c.getString(i) else null }
+                    while(c.moveToNext()) {
+                        if(v("package_name")!=pkg || v("browsable")=="0") continue
+                        // A program poster is not a channel logo. Require a tuner channel URI,
+                        // or an exact known Turkish channel name from the live TV provider.
+                        val intentUri=v("intent_uri")?.let { raw -> runCatching {
+                            android.content.Intent.parseUri(raw,android.content.Intent.URI_INTENT_SCHEME).data
+                        }.getOrNull() }
+                        val channelUri=intentUri?.takeIf { android.media.tv.TvContract.isChannelUriForTunerInput(it) }
+                        var name:String?=null
+                        var logo:Uri?=null
+                        var program:String?=null
+                        if(channelUri!=null) {
+                            runCatching {
+                                resolver.query(channelUri,arrayOf("display_name","type"),null,null,null)?.use { channel ->
+                                    if(channel.moveToFirst() && channel.getString(1)!="TYPE_PREVIEW") {
+                                        name=channel.getString(0)
+                                        logo=android.media.tv.TvContract.buildChannelLogoUri(channelUri)
+                                    }
+                                }
+                            }
+                            if(!name.isNullOrBlank()) runCatching {
+                                val now=System.currentTimeMillis()
+                                val current=android.media.tv.TvContract.buildProgramsUriForChannel(channelUri,now,now+1)
+                                resolver.query(current,arrayOf("title","start_time_utc_millis","end_time_utc_millis"),null,null,null)?.use { p ->
+                                    while(p.moveToNext()) if(p.getLong(1)<=now && p.getLong(2)>now) { program=p.getString(0); break }
+                                }
+                            }
+                        }
+                        val candidate=channelCatalog[normalizeChannel(name ?: v("title").orEmpty())]
+                        if(name.isNullOrBlank()) name=candidate?.name
+                        val display=name?.takeIf { it.isNotBlank() } ?: continue
+                        val providerLogo=uri(v("logo_uri"))
+                        val recent=v("last_engagement_time_utc_millis")?.toLongOrNull() ?: 0L
+                        val watched=path=="watch_next_program" && v("watch_next_type")=="0" && recent>0L && recent<=System.currentTimeMillis()
+                        val score=if(watched) recent else 0L
+                        if(score<=bestTime) continue
+                        val english=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
+                        val source=if(watched) { if(english) "Recently watched · Live TV" else "Yakın zamanda izlenen · Canlı TV" }
+                            else { if(english) "Channel suggestion · Live TV" else "Kanal önerisi · Canlı TV" }
+                        best=Item(display,if(program.isNullOrBlank()) source else source+"\n"+program,
+                            logo,null,true,providerLogo,candidate?.uri)
+                        bestTime=score
+                    }
+                }
+            }.onFailure { android.util.Log.w("TvShelf","Live channel metadata unavailable: "+path,it) }
+        }
+        return best
+    }
+
+    fun select(pkg: String?, liveTv:Boolean=false) {
         stop()
         if (pkg.isNullOrBlank()) return
         active = true
@@ -92,14 +177,14 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val ticket = generation
         main.postDelayed({
             if (ticket == generation && active) worker.execute {
-                val result = query(pkg)
+                val result = if(liveTv) listOfNotNull(liveChannel(pkg)) else query(pkg)
                 main.post {
                     if (ticket == generation && active) {
                         items = result
                         available = result.isNotEmpty()
                         val images=result.count { it.image!=null }
                         val videos=result.count { it.video!=null }
-                        record("IMG: $images  VID: $videos")
+                        record(if(liveTv) (if(result.isEmpty()) "Kanal bilgisi yok" else "Kanal: "+result.first().title) else "IMG: $images  VID: $videos")
                         if (available) show(0) else onItem(null, null)
                     }
                 }
@@ -126,11 +211,12 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         video = item.video
         onItem(item, null)
         worker.execute {
-            val bitmap = item.image?.let { load(it) }
+            val bitmap = item.image?.let { load(it) } ?: item.fallbackLogo?.let { load(it) } ?: item.catalogLogo?.let { load(it) }
             main.post {
                 if (ticket != generation || !active) bitmap?.recycle()
                 else {
                     onItem(item, bitmap)
+                    if(item.channelLogo) record("Kanal: "+item.title+if(bitmap!=null) "  LOGO: OK" else "  LOGO: —")
                     main.postDelayed({
                         if (ticket == generation && active) {
                             ready = true
