@@ -40,30 +40,6 @@ class MainActivity : Activity() {
     private var returnedFromApp=false
     private var lastOpenedId:String?=null
     private lateinit var homeHeader:View
-    private lateinit var moveBackdrop:ImageView
-    private inner class SoftFocusLayout(private val soften:()->Boolean):LinearLayout(this@MainActivity) {
-        private var snapshot:Bitmap?=null
-        private val paint=android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
-        override fun dispatchDraw(canvas:Canvas) {
-            if(!soften() || width<=0 || height<=0) { snapshot=null; super.dispatchDraw(canvas); return }
-            val w=maxOf(1,width/2); val h=maxOf(1,height/2)
-            val b=snapshot?.takeIf { it.width==w && it.height==h } ?: runCatching {
-                Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also {
-                    val c=Canvas(it); c.scale(w.toFloat()/width,h.toFloat()/height); super.dispatchDraw(c); snapshot=it
-                    // A subtle 1-pixel filter at half resolution, preserving artwork geometry.
-                    val p=IntArray(w*h); it.getPixels(p,0,w,0,0,w,h)
-                    val q=p.copyOf()
-                    for(y in 1 until h-1) for(x in 1 until w-1) {
-                        val k=y*w+x; val a=p[k-1]; val b=p[k]; val d=p[k+1]; val e=p[k-w]; val g=p[k+w]
-                        fun avg(shift:Int)=(((a ushr shift and 255)+(b ushr shift and 255)*4+(d ushr shift and 255)+(e ushr shift and 255)+(g ushr shift and 255))/8)
-                        q[k]=(avg(24) shl 24) or (avg(16) shl 16) or (avg(8) shl 8) or avg(0)
-                    }
-                    it.setPixels(q,0,w,0,0,w,h)
-                }
-            }.getOrNull()
-            if(b==null) super.dispatchDraw(canvas) else canvas.drawBitmap(b,null,android.graphics.Rect(0,0,width,height),paint)
-        }
-    }
     private fun focusBorder(selected:Boolean):Drawable? {
         if(!selected) return null
         return object:Drawable() {
@@ -331,6 +307,7 @@ class MainActivity : Activity() {
             expandedShelf=false
             shelf.isFocusable=false
             gridScroll.visibility=View.VISIBLE
+            fitArtwork()
         }
         weatherHandler.removeCallbacks(weatherRefresh)
         if(inputCallbackRegistered) {
@@ -621,8 +598,6 @@ class MainActivity : Activity() {
     }
 
     private fun beginMove(tile: Tile) {
-        val snapshot=runCatching { glassSource.frame()?.bitmap?.let { b -> Bitmap.createScaledBitmap(b,maxOf(1,b.width/2),maxOf(1,b.height/2),true) } }.getOrNull()
-        moveBackdrop.setImageBitmap(snapshot)
         shelfPlayer.stop(); shelfKey=null
         movingId = tile.id
         moveOrder = tiles().map { it.id }.toMutableList()
@@ -639,7 +614,6 @@ class MainActivity : Activity() {
         }
         movingId = null
         moveOrder = null
-        moveBackdrop.setImageDrawable(null)
         shelfKey=null
         refreshCards()
     }
@@ -760,8 +734,6 @@ class MainActivity : Activity() {
         frame.addView(videoSurface,FrameLayout.LayoutParams(-1,-1))
         backdropTint = View(this)
         frame.addView(backdropTint, FrameLayout.LayoutParams(-1, -1))
-        moveBackdrop=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_XY; setBackgroundColor(0x20000000); setColorFilter(0x18000000,PorterDuff.Mode.SRC_ATOP); visibility=View.GONE }
-        frame.addView(moveBackdrop,FrameLayout.LayoutParams(-1,-1))
         glassSource=GlassBackdrop(backdropImage,videoSurface,backdropTint)
         frame.addView(root, FrameLayout.LayoutParams(-1, -1))
         setContentView(frame)
@@ -780,12 +752,12 @@ class MainActivity : Activity() {
                         backdropImage.animate().cancel(); backdropImage.setImageBitmap(bitmap); fitArtwork()
                         backdropImage.alpha=.72f; backdropImage.animate().alpha(1f).setDuration(240).start()
                     }
-                    backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
+                    backdropTint.background=GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,intArrayOf(0xff101823.toInt(),0xbb101823.toInt(),0x00101823,0x00101823))
                 }
                 glassSource.invalidate()
             }
         }
-        val header = SoftFocusLayout { movingId!=null }.apply {
+        val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
@@ -834,8 +806,9 @@ class MainActivity : Activity() {
         header.addView(settings, LinearLayout.LayoutParams(dp(48), dp(36)))
         root.addView(header, LinearLayout.LayoutParams(-1, dp(36)))
         homeHeader=header
+        header.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0xff101823.toInt(),0xdd101823.toInt()))
 
-        shelf = SoftFocusLayout { movingId!=null }.apply {
+        shelf = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = rounded(Color.TRANSPARENT, 0)
@@ -892,6 +865,8 @@ class MainActivity : Activity() {
         moveHint.setPadding(dp(10),dp(6),dp(10),dp(6))
         moveHint.visibility = View.GONE
         root.addView(moveHint, LinearLayout.LayoutParams(-1,-2))
+        shelf.addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() }
+        root.addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() }
         refreshCards()
     }
 
@@ -899,10 +874,9 @@ class MainActivity : Activity() {
         val oldPositions=if(movingId!=null) cardViews.mapValues { (_,v) -> IntArray(2).also { v.getLocationOnScreen(it) } } else emptyMap()
         rows.removeAllViews()
         cardViews.clear()
-        homeHeader.invalidate(); shelf.invalidate(); moveBackdrop.visibility=if(movingId!=null) View.VISIBLE else View.GONE
         val data = tiles()
         modeLabel.text = ""
-        moveHint.visibility = if(movingId != null) View.VISIBLE else View.GONE
+        moveHint.visibility = View.GONE
         section.text = if (showHidden) t("Tüm uygulamalar", "All applications") else if (favorites.isNotEmpty()) t("Favoriler ve uygulamalar", "Favorites and applications") else t("Uygulamalar", "Applications")
         if (data.isEmpty()) {
             rows.addView(text(t("Uygulama bulunamadı.", "No applications found."), 17f, muted()))
@@ -946,7 +920,7 @@ class MainActivity : Activity() {
     }
 
     private fun createCard(tile: Tile, height: Int): View {
-        val holder = SoftFocusLayout { movingId!=null && movingId!=tile.id }.apply {
+        val holder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             isFocusable = true
@@ -1017,15 +991,28 @@ class MainActivity : Activity() {
     }
 
     private fun fitArtwork() {
-        if(!::backdropImage.isInitialized) return
+        if(!::backdropImage.isInitialized || !::shelf.isInitialized || !::homeHeader.isInitialized) return
+        val w=backdropImage.width; val h=backdropImage.height
+        if(w<=0 || h<=0 || shelf.width<=0 || shelf.height<=0) return
+        val origin=IntArray(2); val hero=IntArray(2)
+        backdropImage.getLocationInWindow(origin); shelf.getLocationInWindow(hero)
+        val top=(hero[1]-origin[1]).coerceIn(0,h)
+        val bottom=if(expandedShelf) h-dp(12) else (top+shelf.height).coerceAtMost(h)
+        val left=if(expandedShelf) dp(24) else (w*.43f).roundToInt()
+        val right=w-dp(24)
+        if(bottom<=top || right<=left) return
+        val area=Rect(left,top,right,bottom)
+        backdropImage.clipBounds=area
+        if(::shelfPlayer.isInitialized) shelfPlayer.setPreviewBounds(area)
         val image=backdropImage.drawable ?: return
-        val w=backdropImage.width.toFloat(); val h=backdropImage.height.toFloat()
         val iw=image.intrinsicWidth.toFloat(); val ih=image.intrinsicHeight.toFloat()
-        if(w<=0 || h<=0 || iw<=0 || ih<=0) return
-        val areaW=if(expandedShelf) w else w*.76f
-        val areaH=if(expandedShelf) h else h*.76f
-        val factor=minOf(areaW/iw,areaH/ih)
-        backdropImage.imageMatrix=Matrix().apply { setScale(factor,factor); postTranslate(if(expandedShelf) (w-iw*factor)/2 else w-iw*factor,(areaH-ih*factor)/2) }
+        if(iw<=0 || ih<=0) return
+        val factor=minOf(area.width()/iw,area.height()/ih)
+        backdropImage.imageMatrix=Matrix().apply {
+            setScale(factor,factor)
+            postTranslate(area.left+(area.width()-iw*factor)/2,area.top+(area.height()-ih*factor)/2)
+        }
+        if(::glassSource.isInitialized) glassSource.invalidate()
     }
 
     private fun setExpanded(value: Boolean) {
