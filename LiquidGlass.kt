@@ -18,13 +18,15 @@ internal class GlassBackdrop(private val image: View, private val video: android
         if(w<=0 || h<=0) return null
         val now=android.os.SystemClock.uptimeMillis()
         if(bitmap==null || now-stamp>200) {
-            val bw=minOf(640,w)
+            val bw=minOf(800,w)
             val bh=maxOf(1,(h.toFloat()*bw/w).roundToInt())
             val b=Bitmap.createBitmap(bw,bh,Bitmap.Config.ARGB_8888)
             val c=Canvas(b)
             c.drawColor(Color.rgb(14,19,27))
             c.save()
             c.scale(bw.toFloat()/w,bh.toFloat()/h)
+            // Image is positioned in the launcher frame; include its actual bounds.
+            c.translate(image.left.toFloat(),image.top.toFloat())
             image.draw(c)
             c.restore()
             if(video.alpha>.5f && video.isAvailable) {
@@ -90,9 +92,9 @@ internal class LiquidGlassDrawable(private val owner:View, private val source:Gl
             canvas.drawRect(0f,0f,w,h,paint)
         }
         paint.shader=null
-        paint.color=if(dark) 0x70101a28 else if(focused) 0xa0ffffff.toInt() else 0x208ac2ed
+        paint.color=if(dark) 0x85101a28.toInt() else if(focused) 0x60ffffff else 0x248ac2ed
         canvas.drawRect(0f,0f,w,h,paint)
-        paint.shader=LinearGradient(0f,0f,w,h,intArrayOf(0x55ffffff,0x08ffffff,0x05ffffff,0x22ffffff),floatArrayOf(0f,.25f,.75f,1f),Shader.TileMode.CLAMP)
+        paint.shader=LinearGradient(0f,0f,w,h,intArrayOf(0x64ffffff,0x12ffffff,0x03ffffff,0x2affffff),floatArrayOf(0f,.25f,.75f,1f),Shader.TileMode.CLAMP)
         canvas.drawRect(0f,0f,w,h,paint)
         paint.shader=null
         canvas.restore()
@@ -103,6 +105,10 @@ internal class LiquidGlassDrawable(private val owner:View, private val source:Gl
         val edge=RectF(rect).apply { inset(inset,inset) }
         canvas.drawRoundRect(edge,maxOf(0f,r-inset),maxOf(0f,r-inset),paint)
         paint.shader=null
+        paint.strokeWidth=maxOf(1f,owner.resources.displayMetrics.density*.65f)
+        paint.color=0x60000000
+        val inner=RectF(edge).apply { inset(paint.strokeWidth*1.5f,paint.strokeWidth*1.5f) }
+        canvas.drawRoundRect(inner,maxOf(0f,r-3*inset),maxOf(0f,r-3*inset),paint)
         paint.style=Paint.Style.FILL
         unscheduleSelf(redraw)
         if(owner.isShown) scheduleSelf(redraw,android.os.SystemClock.uptimeMillis()+220)
@@ -121,8 +127,9 @@ internal class LiquidGlassDrawable(private val owner:View, private val source:Gl
         paint.shader=null
     }
     private fun drawMesh(c:Canvas,f:GlassBackdrop.Frame,x:Float,y:Float,w:Float,h:Float) {
-        val cw=maxOf(2,minOf(320,w.roundToInt()))
-        val ch=maxOf(2,minOf(200,h.roundToInt()))
+        val factor=minOf(1f,360f/w,240f/h)
+        val cw=maxOf(2,(w*factor).roundToInt())
+        val ch=maxOf(2,(h*factor).roundToInt())
         val existing=crop
         if(previous!==f.bitmap || existing==null || existing.width!=cw || existing.height!=ch || lastX!=x.roundToInt() || lastY!=y.roundToInt()) {
             val b=Bitmap.createBitmap(cw,ch,Bitmap.Config.ARGB_8888)
@@ -134,7 +141,11 @@ internal class LiquidGlassDrawable(private val owner:View, private val source:Gl
                 postTranslate(-x*cw/w,-y*ch/h)
             })
             Canvas(b).drawRect(0f,0f,cw.toFloat(),ch.toFloat(),Paint(Paint.FILTER_BITMAP_FLAG).apply { shader=sh })
-            crop=b
+            // Sampled frosted glass, modest blur at the same aspect ratio.
+            val softened=Bitmap.createScaledBitmap(b,maxOf(1,cw/3),maxOf(1,ch/3),true)
+            crop=Bitmap.createScaledBitmap(softened,cw,ch,true)
+            if(softened!==crop && softened!==b) softened.recycle()
+            if(b!==crop) b.recycle()
             previous=f.bitmap
             lastX=x.roundToInt(); lastY=y.roundToInt()
         }
@@ -144,7 +155,7 @@ internal class LiquidGlassDrawable(private val owner:View, private val source:Gl
             val u=ix.toFloat()/nx; val v=iy.toFloat()/ny
             val dx=(u-.5f)*2f; val dy=(v-.5f)*2f
             val edge=maxOf(abs(dx),abs(dy)).pow(4)
-            val bend=1f+.05f*edge
+            val bend=1f+.075f*edge
             mesh[i++]=(dx*bend*.5f+.5f)*w
             mesh[i++]=(dy*bend*.5f+.5f)*h
         }
