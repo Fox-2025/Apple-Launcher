@@ -141,8 +141,14 @@ internal class TvShelf(private val context: Context, private val texture: Textur
 
     private fun liveChannel(pkg:String):Item? {
         val resolver=context.contentResolver
-        val u=LiveTuner.channel(context) ?: return null
         val en=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
+        if(pkg=="com.tcl.tv") {
+            // TCL does not expose its active channel to this launcher through the tested providers.
+            // A cached URI or first channel is not the current channel; never display it as such.
+            android.util.Log.i("TvShelf","LIVE actual TCL channel not available; native resume")
+            return Item(if(en) "Live TV" else "Canlı TV",if(en) "Open the last channel in the TV app" else "Son izlenen kanalı TV uygulamasında aç",null,null,true)
+        }
+        val u=LiveTuner.channel(context) ?: return null
         var name=""
         runCatching {
             resolver.query(u,arrayOf("display_name","display_number"),null,null,null)?.use { c ->
@@ -240,7 +246,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                             val candidate=Uri.parse(offer.optString("standardWebURL"))
                             val host=candidate.host?.lowercase(java.util.Locale.ROOT)
                             val technical=offer.optJSONObject("package")?.optString("technicalName").orEmpty()
-                            val trusted=if(tod) host in setOf("todtv.com.tr","www.todtv.com.tr","todtv.com","www.todtv.com") else technical=="netflix" && host in setOf("www.netflix.com","netflix.com")
+                            val trusted=!tod && technical=="netflix" && host in setOf("www.netflix.com","netflix.com")
                             if(candidate.scheme=="https" && trusted && !candidate.path.isNullOrBlank() && candidate.path!="/") { link=candidate; break }
                         }
                         val credit=if(tod) "TOD TV · JustWatch" else if(lang=="tr") "Netflix Türkiye · JustWatch" else "Netflix Turkey · JustWatch"
@@ -467,9 +473,9 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         if (w <= 0 || h <= 0 || vw <= 0 || vh <= 0) return
         val area=previewBounds ?: return
         if(area.width()<=0 || area.height()<=0) return
-        val factor=if(area.top>0) minOf(area.width().toFloat()/vw,area.height().toFloat()/vh) else maxOf(w/vw,h/vh)
+        val factor=if(area.top>0) maxOf(area.width().toFloat()/vw,area.height().toFloat()/vh) else maxOf(w/vw,h/vh)
         val dw=vw*factor; val dh=vh*factor
-        texture.setTransform(Matrix().apply { setScale(dw/w,dh/h); postTranslate((w-dw)/2,area.top+(area.height()-dh)/2) })
+        texture.setTransform(Matrix().apply { setScale(dw/w,dh/h); postTranslate((w-dw)/2,if(area.top>0) area.top.toFloat() else (h-dh)/2) })
     }
 
     private fun releasePlayer() {
