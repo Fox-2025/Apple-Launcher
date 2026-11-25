@@ -47,10 +47,12 @@ class MainActivity : Activity() {
         override fun dispatchDraw(canvas:Canvas) {
             if(!soften() || width<=0 || height<=0) { snapshot=null; super.dispatchDraw(canvas); return }
             val w=maxOf(1,width/5); val h=maxOf(1,height/5)
-            val b=snapshot?.takeIf { it.width==w && it.height==h } ?: Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also {
-                val c=Canvas(it); c.scale(w.toFloat()/width,h.toFloat()/height); super.dispatchDraw(c); snapshot=it
-            }
-            canvas.drawBitmap(b,null,android.graphics.Rect(0,0,width,height),paint)
+            val b=snapshot?.takeIf { it.width==w && it.height==h } ?: runCatching {
+                Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also {
+                    val c=Canvas(it); c.scale(w.toFloat()/width,h.toFloat()/height); super.dispatchDraw(c); snapshot=it
+                }
+            }.getOrNull()
+            if(b==null) super.dispatchDraw(canvas) else canvas.drawBitmap(b,null,android.graphics.Rect(0,0,width,height),paint)
         }
     }
     private fun focusBorder(selected:Boolean):Drawable? {
@@ -764,7 +766,10 @@ class MainActivity : Activity() {
                     backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TL_BR,intArrayOf(0xff26364d.toInt(),0xff151e2c.toInt(),0xff080b12.toInt()))
                 } else {
                     heroArt.visibility=View.INVISIBLE
-                    if(bitmap!=null) backdropImage.setImageBitmap(bitmap)
+                    if(bitmap!=null) {
+                        backdropImage.animate().cancel(); backdropImage.setImageBitmap(bitmap)
+                        backdropImage.alpha=.72f; backdropImage.animate().alpha(1f).setDuration(240).start()
+                    }
                     backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
                 }
                 glassSource.invalidate()
