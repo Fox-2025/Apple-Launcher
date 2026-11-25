@@ -398,8 +398,9 @@ class MainActivity : Activity() {
                     title.take(1).uppercase(), launch, icon, banner)
             }
         }
-        val sourceApp=result.values.firstOrNull { defaultRank(it)==6 }
-        if(sourceApp!=null) result.remove(sourceApp.id)
+        val sourceApps=result.values.filter { defaultRank(it)==6 || it.title.matches(Regex("(?i)HDMI\\s*[0-9]+")) }
+        val sourceApp=sourceApps.firstOrNull { defaultRank(it)==6 }
+        sourceApps.forEach { result.remove(it.id) }
         result["builtin:source"]=Tile("builtin:source","Source",t("TV girişlerini seç","Choose TV input"),0xff25344e.toInt(),"HDMI",sourceApp?.launch,sourceApp?.icon,sourceApp?.banner)
         return result.values.sortedBy { it.title.lowercase() }
     }
@@ -589,7 +590,7 @@ class MainActivity : Activity() {
             id in setOf("com.netflix.ninja","com.netflix.mediaclient") || name=="netflix" -> 1
             id=="com.google.android.youtube.tv" || name=="youtube" -> 2
             id in setOf("com.amazon.amazonvideo.livingroom","com.amazon.avod.thirdpartyclient") || name in setOf("prime video","amazon prime video","amazon video","primevideo") -> 3
-            name=="tod" || name.startsWith("tod ") || id in setOf("com.digiturk.tod","com.todtv.tod","com.digiturk.iq.mobil") -> 4
+            name=="tod" || name.startsWith("tod ") || id in setOf("com.beonetv.tod","com.digiturk.tod.mobil","com.digiturk.tod","com.todtv.tod","com.digiturk.iq.mobil") -> 4
             id in setOf("com.spotify.tv.android","com.spotify.music") || name=="spotify" -> 5
             name in setOf("source","sources","input","inputs","tv inputs","girisler","kaynaklar","kaynak","giris") ||
                 id in setOf("com.tcl.inputsource","com.tcl.tvinput") && !id.startsWith("hdmi:") -> 6
@@ -753,7 +754,7 @@ class MainActivity : Activity() {
             clipToPadding = false
         }
         val frame = FrameLayout(this).apply { setBackgroundColor(bg()) }
-        backdropImage = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+        backdropImage = ImageView(this).apply { scaleType = ImageView.ScaleType.MATRIX; setBackgroundColor(0xff101823.toInt()); addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() } }
         frame.addView(backdropImage, FrameLayout.LayoutParams(-1, -1))
         videoSurface = android.view.TextureView(this)
         frame.addView(videoSurface,FrameLayout.LayoutParams(-1,-1))
@@ -776,7 +777,7 @@ class MainActivity : Activity() {
                 } else {
                     heroArt.visibility=View.INVISIBLE
                     if(bitmap!=null) {
-                        backdropImage.animate().cancel(); backdropImage.setImageBitmap(bitmap)
+                        backdropImage.animate().cancel(); backdropImage.setImageBitmap(bitmap); fitArtwork()
                         backdropImage.alpha=.72f; backdropImage.animate().alpha(1f).setDuration(240).start()
                     }
                     backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
@@ -1015,8 +1016,21 @@ class MainActivity : Activity() {
         return holder
     }
 
+    private fun fitArtwork() {
+        if(!::backdropImage.isInitialized) return
+        val image=backdropImage.drawable ?: return
+        val w=backdropImage.width.toFloat(); val h=backdropImage.height.toFloat()
+        val iw=image.intrinsicWidth.toFloat(); val ih=image.intrinsicHeight.toFloat()
+        if(w<=0 || h<=0 || iw<=0 || ih<=0) return
+        val areaW=if(expandedShelf) w else w*.76f
+        val areaH=if(expandedShelf) h else h*.76f
+        val factor=minOf(areaW/iw,areaH/ih)
+        backdropImage.imageMatrix=Matrix().apply { setScale(factor,factor); postTranslate(if(expandedShelf) (w-iw*factor)/2 else w-iw*factor,(areaH-ih*factor)/2) }
+    }
+
     private fun setExpanded(value: Boolean) {
         expandedShelf=value
+        fitArtwork()
         shelf.isFocusable=value
         if(value) shelf.requestFocus()
         gridScroll.visibility=if(value) View.GONE else View.VISIBLE
@@ -1033,7 +1047,7 @@ class MainActivity : Activity() {
         val color = tile?.color ?: 0xff25466c.toInt()
         shelf.background = rounded(Color.TRANSPARENT, 0)
         val customBg = tile?.let { asset(it, "backdrop") }?.takeIf { it.isFile }
-        backdropImage.setImageDrawable(customBg?.let { Drawable.createFromPath(it.absolutePath) })
+        backdropImage.setImageDrawable(customBg?.let { Drawable.createFromPath(it.absolutePath) }); fitArtwork()
         backdropTint.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
             if (customBg != null) intArrayOf(0x22000000, 0x55000000, 0xee080b12.toInt())
             else intArrayOf(blend(color, if(light) Color.WHITE else Color.BLACK, if(light) .2f else .28f), 0xff171c27.toInt(), 0xff080b12.toInt()))
@@ -1070,7 +1084,7 @@ class MainActivity : Activity() {
         items.addView(text(t("TV girişini seç","Choose a TV input"),14f,0xffc3d0df.toInt()).apply { setPadding(dp(10),0,0,dp(12)) })
         data class Entry(val title:String,val subtitle:String,val kind:String,val action:()->Unit)
         val entries=mutableListOf<Entry>()
-        entries.add(Entry(t("Canlı TV","Live TV"),t("Anten / Uydu","Antenna / Satellite"),"tv") { if(!LiveTuner.open(this)) Toast.makeText(this,t("Kanal bilgisi alınamadı","Channel information unavailable"),Toast.LENGTH_SHORT).show() })
+        entries.add(Entry(t("Canlı TV","Live TV"),t("Anten / Uydu","Antenna / Satellite"),"tv") { if(LiveTuner.open(this)) apps.firstOrNull { it.id=="com.tcl.tv" }?.let { rememberOpened(it) } else Toast.makeText(this,t("Kanal bilgisi alınamadı","Channel information unavailable"),Toast.LENGTH_SHORT).show() })
         for(input in inputs) {
             val name=runCatching { input.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() } ?: input.loadLabel(this).toString() }.getOrDefault(input.id)
             val state=runCatching { tvInputs?.getInputState(input.id) }.getOrNull()
@@ -1156,6 +1170,7 @@ class MainActivity : Activity() {
 
     private fun launch(tile: Tile) {
         if(tile.id=="builtin:source") { sourceMenu(tile); return }
+        if(tile.id=="com.tcl.tv" && LiveTuner.open(this)) { rememberOpened(tile); return }
         val intent = tile.launch
         if (intent == null) {
             Toast.makeText(this, t("Bu giriş açılamıyor.","This input cannot be opened."), Toast.LENGTH_SHORT).show()
