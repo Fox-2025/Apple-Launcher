@@ -27,13 +27,6 @@ import androidx.recyclerview.widget.RecyclerView
 
 class MainActivity : Activity() {
 
-    private class App(
-        val label: String,
-        val pkg: String,
-        val launch: Intent,
-        val banner: Drawable?,
-        val icon: Drawable
-    )
 
     private lateinit var prefs: SharedPreferences
     private lateinit var backdrop: ImageView
@@ -70,7 +63,7 @@ class MainActivity : Activity() {
 
         // Saat
         val textClock = TextClock(this).apply {
-            textColor = Color.WHITE
+            setTextColor(Color.WHITE)
             textSize = 64f
             gravity = Gravity.CENTER
         }
@@ -107,6 +100,10 @@ class MainActivity : Activity() {
         root.addView(backdrop)
         root.addView(shelfTitle)
         root.addView(list)
+        root.addView(textClock, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
+        root.addView(toggle, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START))
+        toggle.visibility = View.VISIBLE
+        toggle.isFocusable = true
 
         appAdapter.setOnItemClickListener { app ->
             try {
@@ -116,7 +113,14 @@ class MainActivity : Activity() {
             }
         }
 
-        list.addOnItemTouchListener(AppLongPressListener(this))
+        appAdapter.setOnItemLongClickListener { app ->
+            AlertDialog.Builder(this).setTitle(app.label)
+                .setItems(arrayOf(if (app.pkg in hiddenSet) "Göster" else "Gizle")) { _, _ ->
+                    hiddenSet = if (app.pkg in hiddenSet) hiddenSet - app.pkg else hiddenSet + app.pkg
+                    prefs.edit().putStringSet("hidden", hiddenSet).apply()
+                    updateVisibleList()
+                }.show()
+        }
     }
 
     private fun loadApps() {
@@ -127,7 +131,7 @@ class MainActivity : Activity() {
             .filter { it.packageName != packageName }
             .mapNotNull { appInfo ->
                 try {
-                    val intent = pm.getLaunchIntentForPackage(appInfo.packageName)
+                    val intent = pm.getLeanbackLaunchIntentForPackage(appInfo.packageName) ?: pm.getLaunchIntentForPackage(appInfo.packageName)
                     val icon = appInfo.loadIcon(pm)
                     val label = appInfo.loadLabel(pm).toString()
                     App(label, appInfo.packageName, intent!!, null, icon)
@@ -140,7 +144,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateVisibleList() {
-        visible = all.filter { !hiddenSet.contains(it.pkg) }
+        visible = if (showHidden) all else all.filter { !hiddenSet.contains(it.pkg) }
         appAdapter.update(visible)
         updateBackdrop()
     }
@@ -151,7 +155,7 @@ class MainActivity : Activity() {
             backdrop.setImageDrawable(it.icon)
             backdrop.alpha = 0.3f
             backdrop.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-            backdrop.setRenderEffect(
+            if (android.os.Build.VERSION.SDK_INT >= 31) backdrop.setRenderEffect(
                 RenderEffect.createBlurEffect(
                     dp(40).toFloat(),
                     dp(40).toFloat(),
