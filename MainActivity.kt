@@ -649,7 +649,7 @@ class MainActivity : Activity() {
                     KeyEvent.KEYCODE_DPAD_RIGHT -> shelfPlayer.next(1)
                     KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_BACK -> setExpanded(false)
                     KeyEvent.KEYCODE_DPAD_UP -> { setExpanded(false); settings.requestFocus() }
-                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0 && shelf.hasFocus()) selectedId?.let { id -> apps.firstOrNull { it.id==id }?.let { launch(it) } }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0 && shelf.hasFocus()) selectedId?.let { id -> apps.firstOrNull { it.id==id }?.let { launchShelfItem(it) } }
                     else -> return super.dispatchKeyEvent(event)
                 }
                 swallowKey=event.keyCode
@@ -1007,6 +1007,14 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun launchShelfItem(tile: Tile) {
+        val link=shelfPlayer.currentLink()
+        if(link!=null && tile.id in setOf("com.netflix.ninja","com.netflix.mediaclient")) {
+            if(runCatching { startActivity(Intent(Intent.ACTION_VIEW,link).setPackage(tile.id)) }.isSuccess) return
+        }
+        launch(tile)
+    }
+
     private fun launch(tile: Tile) {
         if(tile.id=="builtin:source") { sourceMenu(tile); return }
         val intent = tile.launch
@@ -1103,7 +1111,7 @@ class MainActivity : Activity() {
     }
     private fun netflixSettings() {
         val (dialog,_,items)=newGlassDialog(t("Netflix katalog ayarları","Netflix catalog settings"))
-        val explanation=text(t("Türkiye kataloğu için TMDB API v3 anahtarı. Netflix hesabı gerekmez. Katalog verisi kişisel izleme geçmişi değildir.","TMDB API v3 key for the Turkey catalog. No Netflix account needed. Catalog data is not your viewing history."),16f,Color.WHITE,false)
+        val explanation=text(t("Netflix Türkiye önerileri otomatik olarak JustWatch üzerinden alınır. API anahtarı gerekmez. JustWatch yanıt vermezse isteğe bağlı TMDB v3 anahtarı kullanılır. Katalog önerileri kişisel izleme geçmişi değildir.","Netflix Turkey recommendations use JustWatch automatically, without an API key. An optional TMDB v3 key is used if JustWatch returns no data. Catalogue recommendations are not your viewing history."),16f,Color.WHITE,false)
         items.addView(explanation)
         val field=EditText(this).apply {
             hint="TMDB API key (v3)"
