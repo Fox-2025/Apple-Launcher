@@ -103,7 +103,7 @@ class MainActivity : Activity() {
         val field=EditText(this).apply {
             setText(weatherCity()); setSingleLine(true); setTextColor(Color.WHITE); typeface=uiFont(false)
             hint=t("Şehir veya ilçe yazın","Enter a city or district"); setPadding(dp(12),dp(8),dp(12),dp(8))
-            selectAllOnFocus=true
+            setSelectAllOnFocus(true)
         }
         items.addView(field)
         val resultBox=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
