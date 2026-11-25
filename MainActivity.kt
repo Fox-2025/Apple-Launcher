@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.view.Gravity
@@ -24,6 +26,14 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 
 class MainActivity : Activity() {
+
+    private class App(
+        val label: String,
+        val pkg: String,
+        val launch: Intent,
+        val banner: Drawable?,
+        val icon: Drawable
+    )
 
     private lateinit var prefs: SharedPreferences
     private lateinit var backdrop: ImageView
@@ -68,7 +78,7 @@ class MainActivity : Activity() {
         // Üst bar
         shelfTitle = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER
             setPadding(dp(32), dp(16), dp(32), dp(16))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -92,15 +102,12 @@ class MainActivity : Activity() {
             setPadding(0, dp(120), 0, 0)
         }
 
-        // Tümleri ekle
         loadApps()
 
-        // Root'a ekle
         root.addView(backdrop)
         root.addView(shelfTitle)
         root.addView(list)
 
-        // Adapter tıklama
         appAdapter.setOnItemClickListener { app ->
             try {
                 startActivity(app.launch)
@@ -109,7 +116,6 @@ class MainActivity : Activity() {
             }
         }
 
-        // Uzun basma menüsü
         list.addOnItemTouchListener(AppLongPressListener(this))
     }
 
@@ -173,15 +179,12 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        outState.putBoolean("show
+        outState.putBoolean("show_hidden", showHidden)
+    }
 
-[Yanıt uzunluk sınırına ulaştı.] 
-
----
-**Uygulamanın ulaştığı kaynaklar**
-
-- [GitHub: Fox-2025/Apple-Launcher @ 6cb73f5](<https://github.com/Fox-2025/Apple-Launcher/tree/6cb73f5a6349b87e6d6a2e84a606d20f93d56a88>)
-- [README.md](<https://github.com/Fox-2025/Apple-Launcher/blob/6cb73f5a6349b87e6d6a2e84a606d20f93d56a88/README.md>)
-- [app/src/main/AndroidManifest.xml](<https://github.com/Fox-2025/Apple-Launcher/blob/6cb73f5a6349b87e6d6a2e84a606d20f93d56a88/app/src/main/AndroidManifest.xml>)
-- [app/src/main/res/drawable/iclauncher.xml](<https://github.com/Fox-2025/Apple-Launcher/blob/6cb73f5a6349b87e6d6a2e84a606d20f93d56a88/app/src/main/res/drawable/ic_launcher.xml>)
-- [app/src/main/java/com/minilauncher/MainActivity.kt](<https://github.com/Fox-2025/Apple-Launcher/blob/6cb73f5a6349b87e6d6a2e84a606d20f93d56a88/app/src/main/java/com/minilauncher/MainActivity.kt>)
+    override fun onRestoreInstanceState(savedInstanceState: Bundle) {
+        super.onRestoreInstanceState(savedInstanceState)
+        showHidden = savedInstanceState.getBoolean("show_hidden", false)
+        prefs.edit().putBoolean("show_hidden", showHidden).apply()
+    }
+}
