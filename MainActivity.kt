@@ -221,6 +221,11 @@ class MainActivity : Activity() {
         prefs = getSharedPreferences("launcher_prefs", MODE_PRIVATE)
         favorites = readList("favorites")
         order = readList("tile_order")
+        if(!prefs.getBoolean("preferred_layout_v1",false)) {
+            order.clear()
+            prefs.edit().putBoolean("preferred_layout_v1",true)
+                .putBoolean("custom_app_order",false).putString("tile_order","").apply()
+        }
         hidden = (prefs.getStringSet("hidden", emptySet()) ?: emptySet()).toMutableSet()
         light = prefs.getBoolean("light", false)
         english = prefs.getString("language", "tr") == "en"
@@ -492,6 +497,10 @@ class MainActivity : Activity() {
     @Deprecated("Activity result callback")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if(requestCode==232) {
+            apps=installed(); refreshCards(); fetchStoreIcons()
+            return
+        }
         if(requestCode==231) {
             homeSettings()
             return
@@ -518,9 +527,41 @@ class MainActivity : Activity() {
         }.onFailure { Toast.makeText(this, t("Görsel yüklenemedi", "Could not load artwork"), Toast.LENGTH_SHORT).show() }
     }
 
+    private fun defaultRank(tile: Tile): Int {
+        val id=tile.id.lowercase(java.util.Locale.ROOT)
+        val name=java.text.Normalizer.normalize(tile.title.lowercase(java.util.Locale.ROOT),java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"),"").replace('ı','i').trim()
+            .replace(Regex("[_\\s-]+")," ")
+        return when {
+            name in setOf("canli tv","live tv","tv","live television","television","televizyon","tv channels","tv kanallari","channels") ||
+                id in setOf("com.android.tv","com.google.android.tv","com.tcl.tv","com.tcl.tvmanager") && name.contains("tv") -> 0
+            id in setOf("com.netflix.ninja","com.netflix.mediaclient") || name=="netflix" -> 1
+            id=="com.google.android.youtube.tv" || name=="youtube" -> 2
+            id in setOf("com.amazon.amazonvideo.livingroom","com.amazon.avod.thirdpartyclient") || name in setOf("prime video","amazon prime video","amazon video","primevideo") -> 3
+            name=="tod" || name.startsWith("tod ") || id in setOf("com.digiturk.tod","com.todtv.tod","com.digiturk.iq.mobil") -> 4
+            id in setOf("com.spotify.tv.android","com.spotify.music") || name=="spotify" -> 5
+            name in setOf("source","sources","input","inputs","tv inputs","girisler","kaynaklar","kaynak","giris") ||
+                id in setOf("com.tcl.inputsource","com.tcl.tvinput") && !id.startsWith("hdmi:") -> 6
+            id in setOf("com.android.tv.settings","com.android.settings","com.google.android.tv.settings") ||
+                name in setOf("settings","setting","tv settings","system settings","android settings","ayarlar","tv ayarlari") -> 7
+            id=="com.android.vending" || name in setOf("play store","google play store","google play magaza","google play magazasi") -> 8
+            id=="com.disney.disneyplus" || name in setOf("disney","disney+","disney plus") -> 9
+            id in setOf("com.wbd.stream","com.hbo.hbonow","com.hbo.hbomax") || name in setOf("hbo max","hbomax","max") -> 10
+            id in setOf("com.android.chrome","com.android.browser","com.tcl.browser","com.tcl.tvbrowser","com.seraphic.openinet.pre") ||
+                name in setOf("browser","web browser","internet browser","internet tarayicisi","tarayici","chrome","tv browser","browsehere","browse here") -> 11
+            else -> 100
+        }
+    }
+
     private fun tiles(): List<Tile> {
-        val ranks = moveOrder ?: order
-        return apps.filter { showHidden || it.id !in hidden }.sortedBy {
+        val ranks=moveOrder ?: if(prefs.getBoolean("custom_app_order",false)) order else null
+        val available=apps.filter { showHidden || it.id !in hidden }
+        if(ranks==null) {
+            val picked=mutableSetOf<String>()
+            val primary=(0..11).mapNotNull { rank -> available.firstOrNull { defaultRank(it)==rank && picked.add(it.id) } }
+            return primary+available.filterNot { it.id in picked }
+        }
+        return available.sortedBy {
             ranks.indexOf(it.id).let { rank -> if(rank < 0) Int.MAX_VALUE else rank }
         }
     }
@@ -536,6 +577,7 @@ class MainActivity : Activity() {
         if(commit) {
             val next = moveOrder.orEmpty()
             order = (next + order.filterNot { it in next }).toMutableList()
+            prefs.edit().putBoolean("custom_app_order",true).apply()
             save()
         }
         movingId = null
@@ -912,14 +954,15 @@ class MainActivity : Activity() {
     }
 
     private fun edit(tile: Tile) {
-        val actions = arrayOf(t("Taşı","Move"),
+        val actions = mutableListOf(t("Taşı","Move"),
             if(tile.id in hidden) t("Göster","Show") else t("Gizle","Hide"),
             t("Uygulama adını değiştir","Rename application"),
             t("Kendi ikonunu seç","Choose custom icon"),
             t("Arka plan görselini seç","Choose background image"),
             t("Özel görselleri kaldır","Remove custom artwork"),
             t("Orijinal adı geri yükle","Restore original name"))
-        glassMenu(displayName(tile), actions) { which ->
+        if(canUninstall(tile)) actions.add(t("Uygulamayı kaldır","Uninstall application"))
+        glassMenu(displayName(tile), actions.toTypedArray()) { which ->
             when(which) {
                 0 -> { beginMove(tile); return@glassMenu }
                 1 -> if(tile.id in hidden) hidden.remove(tile.id) else hidden.add(tile.id)
@@ -928,9 +971,27 @@ class MainActivity : Activity() {
                 4 -> { chooseArt(tile,true); return@glassMenu }
                 5 -> { asset(tile,"custom").delete(); asset(tile,"backdrop").delete() }
                 6 -> prefs.edit().remove("name_" + tile.id).apply()
+                7 -> { uninstall(tile); return@glassMenu }
             }
             save()
             refreshCards()
+        }
+    }
+
+    private fun canUninstall(tile:Tile):Boolean {
+        if(tile.id.startsWith("hdmi:") || tile.id==packageName) return false
+        return runCatching {
+            val info=packageManager.getApplicationInfo(tile.id,0)
+            (info.flags and (android.content.pm.ApplicationInfo.FLAG_SYSTEM or android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP))==0
+        }.getOrDefault(false)
+    }
+
+    private fun uninstall(tile:Tile) {
+        if(!canUninstall(tile)) return
+        val intent=Intent(Intent.ACTION_DELETE,android.net.Uri.fromParts("package",tile.id,null))
+            .putExtra(Intent.EXTRA_RETURN_RESULT,true)
+        runCatching { startActivityForResult(intent,232) }.onFailure {
+            Toast.makeText(this,t("Uygulama kaldırma ekranı açılamadı.","Could not open the uninstall screen."),Toast.LENGTH_LONG).show()
         }
     }
 
@@ -961,11 +1022,12 @@ class MainActivity : Activity() {
         glassMenu(t("Uygulamalar","Applications"),arrayOf(
             if(showHidden) t("Gizli uygulamaları gizle","Hide hidden apps") else t("Gizli uygulamaları göster","Show hidden apps"),
             if(storeIcons) t("Apple TV ikonlarını kapat","Disable Apple TV icons") else t("Apple TV ikonlarını aç","Enable Apple TV icons"),
-            t("Uygulamaları yenile","Refresh apps")),onBack={showSettings()}) { choice ->
+            t("Uygulamaları yenile","Refresh apps"),t("Varsayılan sıralamayı geri yükle","Restore default layout")),onBack={showSettings()}) { choice ->
             when(choice) {
                 0 -> { showHidden=!showHidden; refreshCards() }
                 1 -> { storeIcons=!storeIcons; save(); refreshCards(); fetchStoreIcons() }
                 2 -> { apps=installed(); refreshCards(); fetchStoreIcons() }
+                3 -> { order.clear(); prefs.edit().putBoolean("custom_app_order",false).apply(); save(); refreshCards() }
             }
             applicationSettings()
         }
