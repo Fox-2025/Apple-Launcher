@@ -10,6 +10,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -31,11 +32,177 @@ class MainActivity : Activity() {
     private lateinit var root: LinearLayout
     private lateinit var backdropImage: ImageView
     private lateinit var backdropTint: View
+    private lateinit var glassSource: GlassBackdrop
+    private lateinit var shelfPlayer: TvShelf
+    private lateinit var videoSurface: android.view.TextureView
+    private lateinit var gridScroll: ScrollView
+    private var expandedShelf = false
+    private var returnedFromApp=false
+    private var lastOpenedId:String?=null
+    private lateinit var homeHeader:View
+    private fun focusBorder(selected:Boolean):Drawable? {
+        if(!selected) return null
+        return object:Drawable() {
+            private val p=Paint(Paint.ANTI_ALIAS_FLAG).apply { style=Paint.Style.STROKE }
+            override fun draw(c:Canvas) {
+                val rect=RectF(bounds).apply { inset(dp(3).toFloat(),dp(3).toFloat()) }
+                p.color=0xff10141c.toInt(); p.strokeWidth=dp(7).toFloat(); c.drawRoundRect(rect,dp(11).toFloat(),dp(11).toFloat(),p)
+                p.color=Color.WHITE; p.strokeWidth=dp(3).toFloat(); c.drawRoundRect(rect,dp(11).toFloat(),dp(11).toFloat(),p)
+            }
+            override fun setAlpha(alpha:Int) { p.alpha=alpha }
+            override fun setColorFilter(filter:ColorFilter?) { p.colorFilter=filter }
+            override fun getOpacity()=PixelFormat.TRANSLUCENT
+        }
+    }
+    private var shelfKey: String? = null
+    private var resumed = false
+    private lateinit var weatherText: TextView
+    private val weatherHandler=android.os.Handler(android.os.Looper.getMainLooper())
+    private val weatherWorker=Executors.newSingleThreadExecutor()
+    private var weatherTicket=0
+    private var weatherBusy=false
+    private val weatherRefresh=Runnable { refreshWeather() }
+    private fun weatherCity()=prefs.getString("weather_city","İstanbul").orEmpty()
+    private fun refreshWeather() {
+        weatherHandler.removeCallbacks(weatherRefresh)
+        if(!resumed || !::weatherText.isInitialized) return
+        weatherHandler.postDelayed(weatherRefresh,30*60*1000L)
+        if(weatherBusy) return
+        val city=weatherCity()
+        val savedLat=prefs.getString("weather_lat",null)?.toDoubleOrNull()
+        val savedLon=prefs.getString("weather_lon",null)?.toDoubleOrNull()
+        val ticket=++weatherTicket
+        weatherBusy=true
+        val old=prefs.getString("weather_display",null)
+        val age=System.currentTimeMillis()-prefs.getLong("weather_time",0)
+        weatherText.text=if(old!=null && prefs.getString("weather_cached_city","")==city && age in 0..3600000L) old else city+"  ·  —°"
+        if(old!=null && prefs.getString("weather_cached_city","")==city && age in 0..900000L) { weatherBusy=false; return }
+        weatherWorker.execute {
+            val data=runCatching {
+                val query=java.net.URLEncoder.encode(city,"UTF-8")
+                fun json(url:String):JSONObject {
+                    val c=URL(url).openConnection().apply { connectTimeout=6000; readTimeout=6000 }
+                    return JSONObject(c.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() })
+                }
+                val location=if(savedLat!=null && savedLon!=null) JSONObject().put("latitude",savedLat).put("longitude",savedLon).put("name",city) else {
+                    val geo=json("https://geocoding-api.open-meteo.com/v1/search?name="+query+"&count=10&language=tr&format=json").getJSONArray("results")
+                    (0 until geo.length()).map { geo.getJSONObject(it) }.firstOrNull { it.optString("country_code")=="TR" } ?: geo.getJSONObject(0)
+                }
+                val lat=location.getDouble("latitude"); val lon=location.getDouble("longitude")
+                val current=json("https://api.open-meteo.com/v1/forecast?latitude="+lat+"&longitude="+lon+"&current=temperature_2m,weather_code,is_day&timezone=auto").getJSONObject("current")
+                val code=current.getInt("weather_code")
+                val day=current.optInt("is_day",1)==1
+                val icon=when(code) {
+                    0 -> if(day) "☀" else "☾"
+                    1,2 -> if(day) "⛅" else "☁"
+                    3,45,48 -> "☁"
+                    in 51..67,in 80..82 -> "☂"
+                    in 71..77,85,86 -> "❄"
+                    in 95..99 -> "ϟ"
+                    else -> "☁"
+                }
+                icon+"  "+current.getDouble("temperature_2m").roundToInt()+"°  "+location.optString("name",city)
+            }.getOrNull()
+            weatherHandler.post {
+                weatherBusy=false
+                if(ticket!=weatherTicket || city!=weatherCity()) { if(resumed) refreshWeather(); return@post }
+                if(data!=null) {
+                    prefs.edit().putString("weather_display",data).putString("weather_cached_city",city).putLong("weather_time",System.currentTimeMillis()).apply()
+                    if(::weatherText.isInitialized) weatherText.text=data
+                }
+            }
+        }
+    }
+    private fun weatherSettings() {
+        val (dialog,_,items)=newGlassDialog(t("Hava durumu • Bölge seçimi","Weather • Choose location"))
+        dialog.setOnCancelListener { dialog.dismiss(); showSettings() }
+        items.addView(text(t("Mevcut bölge: ","Current location: ")+weatherCity(),15f,Color.WHITE))
+        val field=EditText(this).apply {
+            setText(weatherCity()); setSingleLine(true); setTextColor(Color.WHITE); typeface=uiFont(false)
+            hint=t("Şehir veya ilçe yazın","Enter a city or district"); setPadding(dp(12),dp(8),dp(12),dp(8))
+            setSelectAllOnFocus(true)
+        }
+        items.addView(field)
+        val resultBox=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        fun select(city:String,lat:Double,lon:Double) {
+            prefs.edit().putString("weather_city",city).putString("weather_lat",lat.toString())
+                .putString("weather_lon",lon.toString()).remove("weather_time").apply()
+            weatherTicket++
+            weatherText.text=city+"  ·  —°"
+            refreshWeather()
+            dialog.dismiss(); showSettings()
+        }
+        val search=menuRow(t("Bölge ara","Search location")) {
+            val query=field.text.toString().trim().take(70)
+            if(query.length<2) return@menuRow
+            resultBox.removeAllViews()
+            resultBox.addView(text(t("Aranıyor…","Searching…"),14f,Color.LTGRAY))
+            weatherWorker.execute {
+                val results=runCatching {
+                    val q=java.net.URLEncoder.encode(query,"UTF-8")
+                    val c=URL("https://geocoding-api.open-meteo.com/v1/search?name="+q+"&count=15&language=tr&format=json")
+                        .openConnection().apply { connectTimeout=6000; readTimeout=6000 }
+                    val arr=JSONObject(c.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() }).optJSONArray("results")
+                    if(arr==null) emptyList<JSONObject>() else (0 until arr.length()).map { arr.getJSONObject(it) }
+                        .sortedBy { if(it.optString("country_code")=="TR") 0 else 1 }
+                }
+                weatherHandler.post {
+                    if(!dialog.isShowing) return@post
+                    resultBox.removeAllViews()
+                    val locations=results.getOrDefault(emptyList())
+                    if(locations.isEmpty()) resultBox.addView(text(if(results.isFailure) t("Bağlantı hatası. Tekrar deneyin.","Connection error. Try again.") else t("Bölge bulunamadı.","No locations found."),14f,Color.LTGRAY))
+                    var first:View?=null
+                    locations.forEach { place ->
+                        val name=place.optString("name")
+                        val region=listOf(place.optString("admin1"),place.optString("country")).filter { it.isNotBlank() && it!=name }.distinct().joinToString(", ")
+                        val label=if(region.isBlank()) name else name+" · "+region
+                        val row=menuRow(label) { select(name,place.getDouble("latitude"),place.getDouble("longitude")) }
+                        resultBox.addView(row)
+                        if(first==null) first=row
+                    }
+                    first?.requestFocus()
+                }
+            }
+        }
+        items.addView(search)
+        items.addView(resultBox)
+        items.addView(text(t("Hızlı seçim","Quick selection"),14f,Color.LTGRAY))
+        listOf(Triple("İstanbul",41.01,28.95),Triple("Ankara",39.93,32.86),Triple("İzmir",38.42,27.14),
+            Triple("Bursa",40.20,29.06),Triple("Antalya",36.90,30.71)).forEach { place ->
+            items.addView(menuRow(place.first+(if(weatherCity()==place.first) "  ✓" else "")) { select(place.first,place.second,place.third) })
+        }
+        items.addView(text("Weather data: Open-Meteo.com · CC BY 4.0",12f,Color.LTGRAY))
+        presentGlass(dialog); search.requestFocus()
+    }
+    private val tvInputs by lazy { getSystemService(android.media.tv.TvInputManager::class.java) }
+    private var inputCallbackRegistered=false
+    private val inputCallback=object:android.media.tv.TvInputManager.TvInputCallback() {
+        override fun onInputAdded(inputId:String) { refreshInputs() }
+        override fun onInputRemoved(inputId:String) { refreshInputs() }
+        override fun onInputUpdated(inputId:String) { refreshInputs() }
+        override fun onInputStateChanged(inputId:String,state:Int) { refreshInputs() }
+    }
+    private fun refreshInputs() {
+        if(!resumed || !::rows.isInitialized) return
+        val next=installed()
+        if(next.map { Triple(it.id,it.title,it.subtitle) } != apps.map { Triple(it.id,it.title,it.subtitle) }) {
+            apps=next
+            if(movingId==null) refreshCards()
+        }
+    }
+    private val regularFont by lazy { runCatching { Typeface.createFromAsset(assets,"fonts/Inter-Regular.ttf") }.getOrElse { Typeface.create("sans-serif",Typeface.NORMAL) } }
+    private val mediumFont by lazy { runCatching { Typeface.createFromAsset(assets,"fonts/Inter-Medium.ttf") }.getOrElse { Typeface.create("sans-serif-medium",Typeface.NORMAL) } }
+    private fun uiFont(bold: Boolean) = if(bold) mediumFont else regularFont
     private val worker = Executors.newSingleThreadExecutor()
     private var importing: Pair<String, Boolean>? = null
     private var pendingFetch = false
     private var storeIcons = true
     private var largeIcons = false
+    private var movingId: String? = null
+    private var moveOrder: MutableList<String>? = null
+    private lateinit var moveHint: TextView
+    private val columns = 6
+    private var swallowKey = -1
     private var english = false
     private fun t(tr: String, en: String) = if (english) en else tr
     private var activeMenu: Dialog? = null
@@ -43,7 +210,7 @@ class MainActivity : Activity() {
     private lateinit var shelf: LinearLayout
     private lateinit var heroTitle: TextView
     private lateinit var heroSub: TextView
-    private lateinit var heroArt: ShelfArt
+    private lateinit var heroArt: ImageView
     private lateinit var section: TextView
     private lateinit var rows: LinearLayout
     private lateinit var settings: TextView
@@ -69,25 +236,50 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         immersive()
         prefs = getSharedPreferences("launcher_prefs", MODE_PRIVATE)
+        BootSession.observe(this)
         favorites = readList("favorites")
         order = readList("tile_order")
+        if(!prefs.getBoolean("preferred_layout_v1",false)) {
+            order.clear()
+            prefs.edit().putBoolean("preferred_layout_v1",true)
+                .putBoolean("custom_app_order",false).putString("tile_order","").apply()
+        }
         hidden = (prefs.getStringSet("hidden", emptySet()) ?: emptySet()).toMutableSet()
         light = prefs.getBoolean("light", false)
         english = prefs.getString("language", "tr") == "en"
         storeIcons = prefs.getBoolean("store_icons", true)
-        largeIcons = prefs.getBoolean("large_icons", false)
-        demo = prefs.getBoolean("demo", false)
+        largeIcons = false
+        demo = false
         apps = installed()
-        if (!prefs.contains("demo") && apps.size < 5) demo = true
-        selectedId = savedInstanceState?.getString("selected")
+        selectedId = savedInstanceState?.getString("selected") ?: prefs.getString("last_focused_tile",null)
+        lastOpenedId=prefs.getString("last_opened_tile",null)
         buildHome()
-        fetchStoreIcons()
+        root.postDelayed({ if(resumed && !isFinishing && !isDestroyed) fetchStoreIcons() },2500L)
+        if (checkSelfPermission("android.permission.READ_TV_LISTINGS") != android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            !prefs.getBoolean("tv_listing_permission_requested", false)) {
+            prefs.edit().putBoolean("tv_listing_permission_requested", true).apply()
+            runCatching { requestPermissions(arrayOf("android.permission.READ_TV_LISTINGS"), 230) }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 230 && ::shelfPlayer.isInitialized) {
+            shelfKey = null
+            updateShelf(apps.firstOrNull { it.id == selectedId })
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        resumed = true
+        HomeRedirectService.observeLauncher(this)
         immersive()
-        if (::rows.isInitialized) {
+        refreshWeather()
+        if(!inputCallbackRegistered) runCatching {
+            tvInputs?.let { it.registerCallback(inputCallback,android.os.Handler(android.os.Looper.getMainLooper())); inputCallbackRegistered=true }
+        }
+        if (::rows.isInitialized && returnedFromApp) {
             val next = installed()
             if (next.map { it.id to it.title } != apps.map { it.id to it.title }) {
                 apps = next
@@ -95,6 +287,47 @@ class MainActivity : Activity() {
                 fetchStoreIcons()
             }
         }
+        if(returnedFromApp) {
+            returnedFromApp=false
+            val data=tiles()
+            val target=when(prefs.getString("return_focus","opened")) {
+                "first" -> data.firstOrNull()?.id
+                "last" -> selectedId
+                else -> lastOpenedId ?: selectedId
+            }
+            selectedId=data.firstOrNull { it.id==target }?.id ?: data.firstOrNull()?.id
+            selectedId?.let { cardViews[it]?.requestFocus() }
+        }
+        if(::shelfPlayer.isInitialized && selectedId != null) { shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }) }
+    }
+
+    override fun onPause() {
+        resumed=false
+        returnedFromApp=true
+        if(::prefs.isInitialized) prefs.edit().putString("last_focused_tile",selectedId).apply()
+        if(expandedShelf && ::gridScroll.isInitialized) {
+            expandedShelf=false
+            shelf.isFocusable=false
+            gridScroll.visibility=View.VISIBLE
+            fitArtwork()
+        }
+        weatherHandler.removeCallbacks(weatherRefresh)
+        if(inputCallbackRegistered) {
+            runCatching { tvInputs?.unregisterCallback(inputCallback) }
+            inputCallbackRegistered=false
+        }
+        if(::shelfPlayer.isInitialized) shelfPlayer.stop()
+        shelfKey=null
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        if(::shelfPlayer.isInitialized) shelfPlayer.destroy()
+        worker.shutdownNow()
+        weatherHandler.removeCallbacksAndMessages(null)
+        weatherTicket++
+        weatherWorker.shutdownNow()
+        super.onDestroy()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -144,12 +377,18 @@ class MainActivity : Activity() {
                     title.take(1).uppercase(), launch, icon, banner)
             }
         }
+        val sourceApps=result.values.filter { defaultRank(it)==6 || it.title.matches(Regex("(?i)HDMI\\s*[0-9]+")) }
+        val sourceApp=sourceApps.firstOrNull { defaultRank(it)==6 }
+        sourceApps.forEach { result.remove(it.id) }
+        result["builtin:source"]=Tile("builtin:source","Source",t("TV girişlerini seç","Choose TV input"),0xff25344e.toInt(),"HDMI",sourceApp?.launch,sourceApp?.icon,sourceApp?.banner)
         return result.values.sortedBy { it.title.lowercase() }
     }
 
     private fun displayName(tile: Tile): String {
         val custom = prefs.getString("name_" + tile.id, null)
         if (!custom.isNullOrBlank()) return custom
+        if(tile.id=="builtin:source") return "Source"
+        if(tile.id=="com.tcl.tv") return t("Canlı TV","Live TV")
         val name = tile.title.trim().lowercase(java.util.Locale.ROOT)
             .replace(Regex("[_\\s-]+"), " ")
         return when {
@@ -288,6 +527,14 @@ class MainActivity : Activity() {
     @Deprecated("Activity result callback")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if(requestCode==232) {
+            apps=installed(); refreshCards(); fetchStoreIcons()
+            return
+        }
+        if(requestCode==231) {
+            homeSettings()
+            return
+        }
         val request = importing
         importing = null
         if (requestCode != 701 || resultCode != RESULT_OK || request == null) return
@@ -310,12 +557,136 @@ class MainActivity : Activity() {
         }.onFailure { Toast.makeText(this, t("Görsel yüklenemedi", "Could not load artwork"), Toast.LENGTH_SHORT).show() }
     }
 
+    private fun defaultRank(tile: Tile): Int {
+        val id=tile.id.lowercase(java.util.Locale.ROOT)
+        if(id=="builtin:source") return 6
+        val name=java.text.Normalizer.normalize(tile.title.lowercase(java.util.Locale.ROOT),java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"),"").replace('ı','i').trim()
+            .replace(Regex("[_\\s-]+")," ")
+        return when {
+            id=="com.tcl.tv" || name in setOf("canli tv","live tv","tv","live television","television","televizyon","tv channels","tv kanallari","channels") ||
+                id in setOf("com.android.tv","com.google.android.tv","com.tcl.tv","com.tcl.tvmanager") && name.contains("tv") -> 0
+            id in setOf("com.netflix.ninja","com.netflix.mediaclient") || name=="netflix" -> 1
+            id=="com.google.android.youtube.tv" || name=="youtube" -> 2
+            id in setOf("com.amazon.amazonvideo.livingroom","com.amazon.avod.thirdpartyclient") || name in setOf("prime video","amazon prime video","amazon video","primevideo") -> 3
+            name=="tod" || name.startsWith("tod ") || id in setOf("com.beonetv.tod","com.digiturk.tod.mobil","com.digiturk.tod","com.todtv.tod","com.digiturk.iq.mobil") -> 4
+            id in setOf("com.spotify.tv.android","com.spotify.music") || name=="spotify" -> 5
+            name in setOf("source","sources","input","inputs","tv inputs","girisler","kaynaklar","kaynak","giris") ||
+                id in setOf("com.tcl.inputsource","com.tcl.tvinput") && !id.startsWith("hdmi:") -> 6
+            id in setOf("com.android.tv.settings","com.android.settings","com.google.android.tv.settings") ||
+                name in setOf("settings","setting","tv settings","system settings","android settings","ayarlar","tv ayarlari") -> 7
+            id=="com.android.vending" || name in setOf("play store","google play store","google play magaza","google play magazasi") -> 8
+            id=="com.disney.disneyplus" || name in setOf("disney","disney+","disney plus") -> 9
+            id in setOf("com.wbd.stream","com.hbo.hbonow","com.hbo.hbomax") || name in setOf("hbo max","hbomax","max") -> 10
+            id in setOf("com.android.chrome","com.android.browser","com.tcl.browser","com.tcl.tvbrowser","com.seraphic.openinet.pre") ||
+                name in setOf("browser","web browser","internet browser","internet tarayicisi","tarayici","chrome","tv browser","browsehere","browse here") -> 11
+            else -> 100
+        }
+    }
+
     private fun tiles(): List<Tile> {
-        val source = if (demo) samples() + apps else apps
-        val available = source.filter { showHidden || it.id !in hidden }
-        return available.sortedWith(compareBy<Tile> { if (it.id in favorites) 0 else 1 }
-            .thenBy { if (it.id in order) order.indexOf(it.id) else Int.MAX_VALUE }
-            .thenBy { source.indexOf(it) })
+        val ranks=moveOrder ?: if(prefs.getBoolean("custom_app_order",false)) order else null
+        val available=apps.filter { !it.id.startsWith("hdmi:") && (it.id=="builtin:source" || showHidden || it.id !in hidden) }
+        if(ranks==null) {
+            val picked=mutableSetOf<String>()
+            val primary=(0..11).mapNotNull { rank -> available.firstOrNull { defaultRank(it)==rank && picked.add(it.id) } }
+            return primary+available.filterNot { it.id in picked }
+        }
+        val sorted=available.sortedBy {
+            ranks.indexOf(it.id).let { rank -> if(rank < 0) Int.MAX_VALUE else rank }
+        }.toMutableList()
+        if("builtin:source" !in ranks) sorted.firstOrNull { it.id=="builtin:source" }?.let { sorted.remove(it); sorted.add(minOf(columns,sorted.size),it) }
+        return sorted
+    }
+
+    private fun beginMove(tile: Tile) {
+        shelfPlayer.stop(); shelfKey=null
+        movingId = tile.id
+        moveOrder = tiles().map { it.id }.toMutableList()
+        selectedId = tile.id
+        refreshCards()
+    }
+
+    private fun finishMove(commit: Boolean) {
+        if(commit) {
+            val next = moveOrder.orEmpty()
+            order = (next + order.filterNot { it in next }).toMutableList()
+            prefs.edit().putBoolean("custom_app_order",true).apply()
+            save()
+        }
+        movingId = null
+        moveOrder = null
+        shelfKey=null
+        refreshCards()
+    }
+
+    @Deprecated("Android legacy back callback")
+    override fun onBackPressed() {
+        if(movingId != null) finishMove(false)
+        else if(expandedShelf) setExpanded(false)
+        else {
+            selectedId = tiles().firstOrNull()?.id
+            selectedId?.let { cardViews[it]?.requestFocus() } ?: settings.requestFocus()
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if(event.keyCode == swallowKey) {
+            if(event.action == KeyEvent.ACTION_UP) swallowKey = -1
+            return true
+        }
+        if(movingId != null) {
+            val keys = setOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BACK)
+            if(event.keyCode in keys) {
+                if(event.action == KeyEvent.ACTION_DOWN) {
+                    val list = moveOrder ?: return true
+                    val i = list.indexOf(movingId)
+                    val target = when(event.keyCode) {
+                        KeyEvent.KEYCODE_DPAD_LEFT -> if(i % columns > 0) i-1 else i
+                        KeyEvent.KEYCODE_DPAD_RIGHT -> if(i % columns < columns-1) i+1 else i
+                        KeyEvent.KEYCODE_DPAD_UP -> i-columns
+                        KeyEvent.KEYCODE_DPAD_DOWN -> if(i/columns < list.lastIndex/columns) minOf(i+columns,list.lastIndex) else i
+                        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { swallowKey=event.keyCode; finishMove(true); return true }
+                        KeyEvent.KEYCODE_BACK -> { swallowKey=event.keyCode; finishMove(false); return true }
+                        else -> i
+                    }
+                    if(i >= 0 && target in list.indices && target != i) {
+                        val id = list.removeAt(i)
+                        list.add(target,id)
+                        selectedId=id
+                        refreshCards()
+                    }
+                }
+                return true
+            }
+        }
+        if(event.action == KeyEvent.ACTION_DOWN && activeMenu == null && ::shelfPlayer.isInitialized) {
+            if(::settings.isInitialized && settings.hasFocus() && (event.keyCode==KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode==KeyEvent.KEYCODE_ENTER)) {
+                swallowKey=event.keyCode
+                if(event.repeatCount==0) showSettings()
+                return true
+            }
+            if(expandedShelf) {
+                when(event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> shelfPlayer.next(-1)
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> shelfPlayer.next(1)
+                    KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_BACK -> setExpanded(false)
+                    KeyEvent.KEYCODE_DPAD_UP -> { setExpanded(false); settings.requestFocus() }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0 && shelf.hasFocus()) selectedId?.let { id -> apps.firstOrNull { it.id==id }?.let { launchShelfItem(it) } }
+                    else -> return super.dispatchKeyEvent(event)
+                }
+                swallowKey=event.keyCode
+                return true
+            }
+            if(event.keyCode==KeyEvent.KEYCODE_DPAD_UP && shelfPlayer.available && tiles().take(columns).any { it.id==selectedId && cardViews[it.id]?.hasFocus()==true }) {
+                setExpanded(true)
+                swallowKey=event.keyCode
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     private fun text(value: String, size: Float, color: Int, bold: Boolean = false) =
@@ -323,7 +694,8 @@ class MainActivity : Activity() {
             text = value
             textSize = size
             setTextColor(color)
-            if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            typeface = uiFont(bold)
+            letterSpacing = -0.015f
             includeFontPadding = false
         }
 
@@ -345,6 +717,9 @@ class MainActivity : Activity() {
     }
 
     private fun buildHome() {
+        if(::shelfPlayer.isInitialized) shelfPlayer.destroy()
+        shelfKey=null
+        expandedShelf=false
         cardViews.clear()
         val metrics = resources.displayMetrics
         val screenH = (metrics.heightPixels / metrics.density).toInt()
@@ -355,17 +730,47 @@ class MainActivity : Activity() {
             clipToPadding = false
         }
         val frame = FrameLayout(this).apply { setBackgroundColor(bg()) }
-        backdropImage = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+        backdropImage = ImageView(this).apply { scaleType = ImageView.ScaleType.MATRIX; setBackgroundColor(0xff101823.toInt()); addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() } }
         frame.addView(backdropImage, FrameLayout.LayoutParams(-1, -1))
+        videoSurface = android.view.TextureView(this)
+        frame.addView(videoSurface,FrameLayout.LayoutParams(-1,-1))
         backdropTint = View(this)
         frame.addView(backdropTint, FrameLayout.LayoutParams(-1, -1))
+        glassSource=GlassBackdrop(backdropImage,videoSurface,backdropTint)
         frame.addView(root, FrameLayout.LayoutParams(-1, -1))
         setContentView(frame)
+        shelfPlayer = TvShelf(this,videoSurface) { item, bitmap ->
+            if(item != null) {
+                heroTitle.text=item.title.ifBlank { apps.firstOrNull { it.id==selectedId }?.let { displayName(it) }.orEmpty() }
+                heroSub.text=item.description
+                if(item.channelLogo) {
+                    heroArt.setImageBitmap(bitmap)
+                    heroArt.visibility=if(bitmap!=null) View.VISIBLE else View.INVISIBLE
+                    backdropImage.setImageDrawable(null)
+                    backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TL_BR,intArrayOf(0xff26364d.toInt(),0xff151e2c.toInt(),0xff080b12.toInt()))
+                } else {
+                    heroArt.visibility=View.INVISIBLE
+                    if(bitmap!=null) {
+                        backdropImage.animate().cancel(); backdropImage.setImageBitmap(bitmap); fitArtwork()
+                        backdropImage.alpha=.88f; backdropImage.animate().alpha(1f).setDuration(300).start()
+                    }
+                    backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
+                }
+                glassSource.invalidate()
+            }
+        }
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        header.addView(View(this), LinearLayout.LayoutParams(1, 1))
+        weatherText=text(weatherCity()+"  ·  —°",19f,Color.WHITE,true).apply {
+            gravity=Gravity.CENTER_VERTICAL
+            contentDescription=t("Hava durumu ve bölge • Open-Meteo","Weather and location • Open-Meteo")
+            setPadding(dp(4),0,dp(12),0)
+            maxLines=1
+        }
+        header.addView(weatherText,LinearLayout.LayoutParams(-2,-1))
+        if(resumed) refreshWeather()
         header.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         modeLabel = text("", 10f, Color.WHITE, true)
         header.addView(modeLabel)
@@ -376,22 +781,36 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             setPadding(dp(22), 0, dp(20), 0)
         }
+        clock.typeface=uiFont(false)
         header.addView(clock)
-        settings = text("⚙", 24f, Color.WHITE, true).apply {
+        settings = object : TextView(this) {
+            private val gear = SettingsGear(Color.WHITE)
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                val side=minOf(width,height)*0.64f
+                gear.setBounds(((width-side)/2).toInt(),((height-side)/2).toInt(),((width+side)/2).toInt(),((height+side)/2).toInt())
+                gear.draw(canvas)
+            }
+        }.apply {
             contentDescription = t("Başlatıcı ayarları", "Launcher settings")
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(7), dp(12), dp(7))
             isFocusable = true
             isClickable = true
-            background = glass(false)
+            background = LiquidGlassDrawable(this,glassSource,dp(22).toFloat())
             setOnClickListener { showSettings() }
             setOnFocusChangeListener { v, focused ->
-                v.background = glass(focused)
+                if(focused && expandedShelf) { expandedShelf=false; gridScroll.visibility=View.VISIBLE; shelfPlayer.expand(false) }
+                v.background = LiquidGlassDrawable(v,glassSource,dp(22).toFloat(),focused=focused)
                 v.animate().scaleX(if(focused) 1.10f else 1f).scaleY(if(focused) 1.10f else 1f).setDuration(140).start()
             }
         }
         header.addView(settings, LinearLayout.LayoutParams(dp(48), dp(36)))
         root.addView(header, LinearLayout.LayoutParams(-1, dp(36)))
+        homeHeader=header
+        header.background=null
+        weatherText.setShadowLayer(dp(3).toFloat(),0f,dp(1).toFloat(),Color.BLACK)
+        clock.setShadowLayer(dp(3).toFloat(),0f,dp(1).toFloat(),Color.BLACK)
 
         shelf = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -411,10 +830,14 @@ class MainActivity : Activity() {
             setPadding(0, dp(8), 0, dp(7))
         }
         copy.addView(heroTitle)
-        heroSub = text(t("Uygulamalarını seç", "Choose an app"), 15f, 0xffe0e9f8.toInt()).apply { maxLines = 2 }
+        heroSub = text(t("Uygulamalarını seç", "Choose an app"), 15f, 0xffe0e9f8.toInt()).apply { maxLines = 4 }
         copy.addView(heroSub)
         shelf.addView(copy, LinearLayout.LayoutParams(0, -1, 1f))
-        heroArt = ShelfArt()
+        heroArt = ImageView(this).apply {
+            scaleType=ImageView.ScaleType.FIT_CENTER
+            setPadding(dp(65),dp(32),dp(65),dp(32))
+            visibility=View.INVISIBLE
+        }
         shelf.addView(heroArt, LinearLayout.LayoutParams(0, -1, 1.15f))
         root.addView(shelf, LinearLayout.LayoutParams(-1, dp((screenH * 0.46f).roundToInt().coerceIn(150, 480))).apply {
             topMargin = dp(8); bottomMargin = dp(12)
@@ -438,9 +861,16 @@ class MainActivity : Activity() {
             setPadding(dp(3), dp(8), dp(3), dp(14))
         }
         scroll.addView(rows, FrameLayout.LayoutParams(-1, -2))
+        gridScroll=scroll
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        val hint = text(t("↑ ↓ ← →  Gezin   •   OK  Aç   •   OK uzun bas  Düzenle", "↑ ↓ ← →  Navigate   •   OK  Open   •   Hold OK  Edit"), 11f, muted())
-        hint.visibility = View.GONE
+        moveHint = text(t("Yön tuşları: Taşı    •    OK: Kaydet    •    Geri: İptal", "Arrows: Move    •    OK: Save    •    Back: Cancel"), 15f, Color.WHITE, true)
+        moveHint.gravity = Gravity.CENTER
+        moveHint.background = glass(false)
+        moveHint.setPadding(dp(10),dp(6),dp(10),dp(6))
+        moveHint.visibility = View.GONE
+        root.addView(moveHint, LinearLayout.LayoutParams(-1,-2))
+        homeHeader.addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() }
+        root.addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() }
         refreshCards()
     }
 
@@ -448,16 +878,16 @@ class MainActivity : Activity() {
         rows.removeAllViews()
         cardViews.clear()
         val data = tiles()
-        modeLabel.text = if (demo) "DEMO" else ""
+        modeLabel.text = ""
+        moveHint.visibility = View.GONE
         section.text = if (showHidden) t("Tüm uygulamalar", "All applications") else if (favorites.isNotEmpty()) t("Favoriler ve uygulamalar", "Favorites and applications") else t("Uygulamalar", "Applications")
         if (data.isEmpty()) {
-            rows.addView(text(t("Uygulama bulunamadı. Ayarlar menüsünden demo modunu açabilirsin.", "No applications found. Enable demo mode in settings."), 17f, muted()))
+            rows.addView(text(t("Uygulama bulunamadı.", "No applications found."), 17f, muted()))
             updateShelf(null)
             settings.requestFocus()
             return
         }
         val screenW = (resources.displayMetrics.widthPixels / resources.displayMetrics.density).toInt()
-        val columns = if (largeIcons) 5 else 6
         val height = ((screenW - 130) / columns.toFloat() / (5f/3f)).roundToInt().coerceIn(48, 190)
         for ((rowIndex, group) in data.chunked(columns).withIndex()) {
             val row = LinearLayout(this).apply {
@@ -465,7 +895,7 @@ class MainActivity : Activity() {
                 clipChildren = false
                 clipToPadding = false
                 setPadding(dp(7), dp(10), dp(7), dp(5))
-                if (rowIndex == 0) background = rounded(0x38ffffff, 24, 0x55ffffff, 1)
+                if (rowIndex == 0) background = LiquidGlassDrawable(this,glassSource,dp(24).toFloat(),dark=true)
             }
             for (tile in group) {
                 val card = createCard(tile, height)
@@ -500,7 +930,16 @@ class MainActivity : Activity() {
             elevation = dp(3).toFloat()
         }
         val downloaded = artwork(tile)
-        if (downloaded != null || tile.banner != null || tile.icon != null) {
+        val systemSettings = tile.id in setOf("com.android.tv.settings","com.android.settings","com.google.android.tv.settings") ||
+            tile.title.lowercase() in setOf("settings","ayarlar","tv settings","tv ayarları")
+        if(tile.id=="builtin:source") {
+            panel.background=GradientDrawable(GradientDrawable.Orientation.TL_BR,intArrayOf(0xff45617c.toInt(),0xff182735.toInt())).apply { cornerRadius=dp(13).toFloat() }
+            panel.addView(ImageView(this).apply { setImageDrawable(SourceGlyph("source")); scaleType=ImageView.ScaleType.FIT_CENTER; setPadding(dp(14),dp(9),dp(14),dp(9)) },FrameLayout.LayoutParams(-1,-1))
+        } else if(systemSettings && !asset(tile,"custom").isFile) {
+            panel.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0xff9da3ae.toInt(),0xff555c67.toInt())).apply { cornerRadius=dp(13).toFloat() }
+            val image=ImageView(this).apply { setImageDrawable(SettingsGear(Color.WHITE)); scaleType=ImageView.ScaleType.FIT_CENTER; setPadding(dp(10),dp(8),dp(10),dp(8)) }
+            panel.addView(image,FrameLayout.LayoutParams(-1,-1))
+        } else if (downloaded != null || tile.banner != null || tile.icon != null) {
             val image = ImageView(this).apply {
                 setImageDrawable(downloaded ?: tile.banner ?: tile.icon)
                 scaleType = if (downloaded != null || tile.banner != null) ImageView.ScaleType.CENTER_CROP else ImageView.ScaleType.FIT_CENTER
@@ -531,94 +970,439 @@ class MainActivity : Activity() {
             setPadding(0,dp(7),0,dp(2))
         }
         holder.addView(label, LinearLayout.LayoutParams(-1,-2))
-        holder.setOnClickListener { launch(tile) }
-        holder.setOnLongClickListener { edit(tile); true }
+        holder.setOnClickListener { if(movingId != null) finishMove(true) else launch(tile) }
+        holder.setOnLongClickListener { if(movingId == null) edit(tile); true }
         holder.setOnFocusChangeListener { view, focus ->
-            view.animate().scaleX(if(focus) 1.12f else 1f).scaleY(if(focus) 1.12f else 1f).setDuration(150).start()
-            view.translationZ = if(focus) dp(14).toFloat() else 0f
-            panel.elevation = if(focus) dp(12).toFloat() else dp(3).toFloat()
-            border.background = rounded(Color.TRANSPARENT, 13, if(focus) Color.WHITE else Color.TRANSPARENT, 2)
-            label.setTextColor(if(focus) Color.WHITE else Color.TRANSPARENT)
+            val lifted=if(movingId!=null) movingId==tile.id else focus
+            val moving=movingId!=null
+            val scale=if(lifted && !moving) 1.10f else 1f
+            view.animate().cancel()
+            if(moving) { view.scaleX=1f; view.scaleY=1f } else view.animate().scaleX(scale).scaleY(scale).setInterpolator(android.view.animation.PathInterpolator(0.2f,0f,0.2f,1f)).setDuration(if(lifted) 230L else 170L).start()
+            view.translationZ = if(lifted && !moving) dp(10).toFloat() else 0f
+            panel.elevation = if(lifted && !moving) dp(8).toFloat() else dp(3).toFloat()
+            border.background = focusBorder(lifted)
+            label.setTextColor(if(lifted) Color.WHITE else Color.TRANSPARENT)
             if (focus) { selectedId = tile.id; updateShelf(tile) }
         }
         return holder
     }
 
+    private fun fitArtwork() {
+        if(!::backdropImage.isInitialized || !::homeHeader.isInitialized) return
+        val w=backdropImage.width; val h=backdropImage.height
+        if(w<=0 || h<=0) return
+        val prime=shelfKey in setOf("com.amazon.amazonvideo.livingroom","com.amazon.avod.thirdpartyclient")
+        val origin=IntArray(2); val header=IntArray(2)
+        backdropImage.getLocationInWindow(origin); homeHeader.getLocationInWindow(header)
+        val top=if(prime) (header[1]-origin[1]+homeHeader.height+dp(6)).coerceIn(0,h-1) else 0
+        val area=Rect(0,top,w,h)
+        backdropImage.clipBounds=if(prime) area else null
+        if(::shelfPlayer.isInitialized) shelfPlayer.setPreviewBounds(area)
+        val image=backdropImage.drawable ?: return
+        val iw=image.intrinsicWidth.toFloat(); val ih=image.intrinsicHeight.toFloat()
+        if(iw<=0 || ih<=0) return
+        // Prime fills the full width below the header; crop vertically rather than leaving a side gap.
+        val factor=if(prime) maxOf(w/iw,(h-top)/ih) else maxOf(w/iw,h/ih)
+        backdropImage.imageMatrix=Matrix().apply {
+            setScale(factor,factor)
+            postTranslate((w-iw*factor)/2,if(prime) top.toFloat() else (h-ih*factor)/2)
+        }
+        if(::glassSource.isInitialized) glassSource.invalidate()
+    }
+
+    private fun setExpanded(value: Boolean) {
+        expandedShelf=value
+        fitArtwork()
+        shelf.isFocusable=value
+        if(value) shelf.requestFocus()
+        gridScroll.visibility=if(value) View.GONE else View.VISIBLE
+        shelfPlayer.expand(value)
+        if(!value) selectedId?.let { cardViews[it]?.requestFocus() }
+    }
+
     private fun updateShelf(tile: Tile?) {
+        if(movingId!=null) return
+        val newKey=tile?.id?.takeIf { id -> tiles().take(columns).any { it.id==id } && !id.startsWith("hdmi:") && !id.startsWith("builtin:") }
+        if(shelfKey==newKey && newKey!=null && shelfPlayer.available) return
+        shelfKey=newKey
+        if(::shelfPlayer.isInitialized) shelfPlayer.select(if(resumed && movingId==null) newKey else null,tile?.let { defaultRank(it)==0 }==true)
         val color = tile?.color ?: 0xff25466c.toInt()
         shelf.background = rounded(Color.TRANSPARENT, 0)
         val customBg = tile?.let { asset(it, "backdrop") }?.takeIf { it.isFile }
-        backdropImage.setImageDrawable(customBg?.let { Drawable.createFromPath(it.absolutePath) })
+        backdropImage.setImageDrawable(customBg?.let { Drawable.createFromPath(it.absolutePath) }); fitArtwork()
         backdropTint.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
             if (customBg != null) intArrayOf(0x22000000, 0x55000000, 0xee080b12.toInt())
             else intArrayOf(blend(color, if(light) Color.WHITE else Color.BLACK, if(light) .2f else .28f), 0xff171c27.toInt(), 0xff080b12.toInt()))
         heroTitle.text = tile?.let { displayName(it) } ?: t("Ana Ekran", "Home")
-        heroSub.text = if(tile == null) t("Ayarlar üzerinden demo modunu aç", "Enable demo mode in settings")
-            else if(tile.launch == null) tile.subtitle + "  •  Demo" else tile.subtitle
-        heroArt.tile = tile
-        heroArt.visibility = if (customBg != null) View.INVISIBLE else View.VISIBLE
-        heroArt.invalidate()
+        heroSub.text = if(tile == null) t("Uygulama seç", "Choose an app") else tile.subtitle
+        heroArt.setImageDrawable(null)
+        heroArt.visibility = View.INVISIBLE
+        glassSource.invalidate()
+    }
+
+    private class SourceGlyph(private val kind:String):Drawable() {
+        private val p=Paint(Paint.ANTI_ALIAS_FLAG).apply { color=Color.WHITE; style=Paint.Style.STROKE; strokeWidth=2.5f; strokeCap=Paint.Cap.ROUND; strokeJoin=Paint.Join.ROUND }
+        override fun draw(c:Canvas) {
+            val b=bounds; val size=minOf(b.width(),b.height()).toFloat()
+            c.save(); c.translate(b.exactCenterX()-size/2,b.exactCenterY()-size/2); c.scale(size/64,size/64)
+            if(kind=="hdmi") {
+                val path=Path().apply { moveTo(12f,18f); lineTo(52f,18f); lineTo(52f,36f); lineTo(43f,45f); lineTo(21f,45f); lineTo(12f,36f); close() }; c.drawPath(path,p)
+                for(x in 20..44 step 6) c.drawLine(x.toFloat(),25f,x.toFloat(),31f,p)
+            } else {
+                c.drawRoundRect(8f,12f,56f,48f,4f,4f,p)
+                if(kind=="tv") { c.drawLine(24f,55f,40f,55f,p); c.drawLine(32f,48f,32f,55f,p) }
+                else { c.drawLine(2f,30f,38f,30f,p); c.drawLine(29f,21f,38f,30f,p); c.drawLine(29f,39f,38f,30f,p) }
+            }
+            c.restore()
+        }
+        override fun setAlpha(a:Int) { p.alpha=a }
+        override fun setColorFilter(f:ColorFilter?) { p.colorFilter=f }
+        override fun getOpacity()=PixelFormat.TRANSLUCENT
+    }
+
+    private fun sourceMenu(tile:Tile) {
+        val inputs=runCatching { tvInputs?.tvInputList.orEmpty().filter { it.isPassthroughInput && !it.isHidden(this) }.sortedBy { it.loadLabel(this).toString() } }.getOrDefault(emptyList())
+        val (dialog,body,items)=newGlassDialog(t("Kaynaklar","Sources"))
+        items.addView(text(t("TV girişini seç","Choose a TV input"),14f,0xffc3d0df.toInt()).apply { setPadding(dp(10),0,0,dp(12)) })
+        data class Entry(val title:String,val subtitle:String,val kind:String,val action:()->Unit)
+        val entries=mutableListOf<Entry>()
+        entries.add(Entry(t("Canlı TV","Live TV"),t("Anten / Uydu","Antenna / Satellite"),"tv") { if(LiveTuner.open(this)) apps.firstOrNull { it.id=="com.tcl.tv" }?.let { rememberOpened(it) } else Toast.makeText(this,t("Kanal bilgisi alınamadı","Channel information unavailable"),Toast.LENGTH_SHORT).show() })
+        for(input in inputs) {
+            val original=runCatching { input.loadLabel(this).toString() }.getOrDefault(input.id)
+            val custom=runCatching { input.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() && it!=original } }.getOrNull()
+            val name=custom ?: original
+            val state=runCatching { tvInputs?.getInputState(input.id) }.getOrNull()
+            val status=when(state) {
+                android.media.tv.TvInputManager.INPUT_STATE_CONNECTED -> t("● Bağlı","● Connected")
+                android.media.tv.TvInputManager.INPUT_STATE_CONNECTED_STANDBY -> t("Beklemede","Standby")
+                android.media.tv.TvInputManager.INPUT_STATE_DISCONNECTED -> t("Bağlı değil","Disconnected")
+                else -> t("Durum bilinmiyor","Status unknown")
+            }
+            entries.add(Entry(name,(if(custom!=null) "$original · " else "")+status,if(input.type==android.media.tv.TvInputInfo.TYPE_HDMI) "hdmi" else "source") {
+                val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(input.id)
+                val intent=Intent(Intent.ACTION_VIEW,uri)
+                val launched=runCatching { startActivity(Intent(intent).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")); true }.getOrElse { runCatching { startActivity(intent); true }.getOrDefault(false) }
+                android.util.Log.i("TvShelf","INPUT id="+input.id+" state="+state+" accepted="+launched)
+                if(launched) rememberOpened(tile) else Toast.makeText(this,t("Giriş açılamadı","Input unavailable"),Toast.LENGTH_SHORT).show()
+            })
+        }
+        entries.add(Entry(t("TV kaynak seçici","TV source selector"),t("Sistem menüsü","System menu"),"source") {
+            if(tile.launch==null || !runCatching { startActivity(tile.launch); true }.getOrDefault(false)) Toast.makeText(this,t("Kumandadaki Source tuşunu kullan","Use the remote Source button"),Toast.LENGTH_SHORT).show()
+        })
+        var first:View?=null
+        for(group in entries.chunked(2)) {
+            val row=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; clipChildren=false; clipToPadding=false }
+            for(entry in group) {
+                val card=LinearLayout(this).apply {
+                    orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER; isFocusable=true; isClickable=true
+                    setPadding(dp(7),dp(9),dp(7),dp(9)); background=LiquidGlassDrawable(this,glassSource,dp(18).toFloat(),dark=true)
+                    addView(ImageView(this@MainActivity).apply { setImageDrawable(SourceGlyph(entry.kind)) },LinearLayout.LayoutParams(dp(44),dp(44)))
+                    addView(text(entry.title,16f,Color.WHITE,true).apply { gravity=Gravity.CENTER; maxLines=2 })
+                    addView(text(entry.subtitle,11f,0xffc3d0df.toInt()).apply { gravity=Gravity.CENTER; maxLines=2 })
+                    setOnFocusChangeListener { v,f -> v.background=LiquidGlassDrawable(v,glassSource,dp(18).toFloat(),focused=f,dark=true); v.foreground=focusBorder(f); v.animate().scaleX(if(f)1.04f else 1f).scaleY(if(f)1.04f else 1f).setDuration(180).start() }
+                    setOnClickListener { dialog.dismiss(); entry.action() }
+                }
+                row.addView(card,LinearLayout.LayoutParams(0,dp(108),1f).apply { setMargins(dp(5),dp(5),dp(5),dp(5)) })
+                if(first==null) first=card
+            }
+            if(group.size==1) row.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
+            items.addView(row)
+        }
+        presentGlass(dialog)
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels*.56f).roundToInt(),(resources.displayMetrics.heightPixels*.85f).roundToInt())
+        first?.requestFocus()
+    }
+
+    private fun rememberOpened(tile:Tile) { lastOpenedId=tile.id; prefs.edit().putString("last_opened_tile",tile.id).apply() }
+
+    private fun launchShelfItem(tile: Tile) {
+        val link=shelfPlayer.currentLink(tile.id)
+        if(tile.id=="com.tcl.tv") { launch(tile); return }
+        if(tile.id in setOf("com.beonetv.tod","com.digiturk.tod","com.digiturk.tod.mobil","com.todtv.tod","com.digiturk.iq.mobil")) {
+            // This installed TV app advertises MAIN only; do not send unsupported web links.
+            launch(tile); return
+        }
+        val netflix=tile.id in setOf("com.netflix.ninja","com.netflix.mediaclient")
+        val candidates=mutableListOf<Intent>()
+        if(link!=null) {
+            if(netflix && link.scheme=="https" && link.host in setOf("netflix.com","www.netflix.com")) {
+                val parts=link.pathSegments
+                val id=parts.zipWithNext().firstOrNull { (kind,value) -> kind in setOf("title","watch") && value.matches(Regex("[0-9]+")) }?.second
+                if(id!=null) {
+                    for(scheme in listOf("https","nflx")) {
+                        candidates.add(Intent(Intent.ACTION_VIEW,android.net.Uri.parse("$scheme://www.netflix.com/title/$id"))
+                            .putExtra("source","30").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+                    }
+                }
+            }
+            runCatching {
+                val parsed=Intent.parseUri(link.toString(),Intent.URI_INTENT_SCHEME or Intent.URI_ANDROID_APP_SCHEME)
+                if(parsed.component?.packageName?.let { it!=tile.id }!=true &&
+                    parsed.`package`?.let { it!=tile.id }!=true) {
+                    parsed.selector=null
+                    parsed.clipData=null
+                    parsed.flags=0
+                    if(netflix) parsed.putExtra("source","30")
+                    candidates.add(parsed)
+                }
+            }
+        }
+        for(candidate in candidates) {
+            candidate.setPackage(tile.id)
+            val result=runCatching { startActivity(candidate) }
+            android.util.Log.i("TvShelf","OPEN pkg="+tile.id+" scheme="+(candidate.data?.scheme ?: "none")+" accepted="+result.isSuccess+
+                (result.exceptionOrNull()?.let { " error="+it.javaClass.simpleName } ?: ""))
+            if(result.isSuccess) { rememberOpened(tile); return }
+        }
+        android.util.Log.i("TvShelf","OPEN pkg="+tile.id+" fallback=app link="+(link!=null))
+        Toast.makeText(this,t("İçerik bağlantısı açılamadı; uygulama açılıyor.","Title link unavailable; opening app."),Toast.LENGTH_SHORT).show()
+        launch(tile)
     }
 
     private fun launch(tile: Tile) {
-        val intent = tile.launch
-        if (intent == null) {
-            Toast.makeText(this, displayName(tile) + t(" — demo kartı, gerçek uygulama değil.", " — demo tile, not an installed application."), Toast.LENGTH_SHORT).show()
+        if(tile.id=="builtin:source") { sourceMenu(tile); return }
+        if(tile.id=="com.tcl.tv") {
+            if(LiveTuner.open(this)) rememberOpened(tile) else Toast.makeText(this,t("Canlı TV kanalı bulunamadı","Live TV channel unavailable"),Toast.LENGTH_SHORT).show()
             return
         }
-        runCatching { startActivity(intent) }.onFailure {
+        val intent = tile.launch
+        if (intent == null) {
+            Toast.makeText(this, t("Bu giriş açılamıyor.","This input cannot be opened."), Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching { startActivity(intent); rememberOpened(tile) }.onFailure {
             Toast.makeText(this, t("Uygulama açılamadı", "Could not open application"), Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun edit(tile: Tile) {
-        val list = tiles().map { it.id }.toMutableList()
-        val actions = arrayOf(if(tile.id in favorites) t("Favorilerden çıkar", "Remove from favorites") else t("Favorilere ekle", "Add to favorites"),
-            if(tile.id in hidden) t("Göster", "Show") else t("Gizle", "Hide"), t("Bir sıra sola taşı", "Move left"), t("Bir sıra sağa taşı", "Move right"), t("Kendi ikonunu seç", "Choose custom icon"), t("Arka plan görselini seç", "Choose background image"), t("Özel görselleri kaldır", "Remove custom artwork"), t("Uygulama adını değiştir", "Rename application"), t("Orijinal adı geri yükle", "Restore original name"))
-        glassMenu(displayName(tile), actions) { which ->
+        val actions = mutableListOf(t("Taşı","Move"),
+            if(tile.id in hidden) t("Göster","Show") else t("Gizle","Hide"),
+            t("Uygulama adını değiştir","Rename application"),
+            t("Kendi ikonunu seç","Choose custom icon"),
+            t("Arka plan görselini seç","Choose background image"),
+            t("Özel görselleri kaldır","Remove custom artwork"),
+            t("Orijinal adı geri yükle","Restore original name"))
+        if(canUninstall(tile)) actions.add(t("Uygulamayı kaldır","Uninstall application"))
+        glassMenu(displayName(tile), actions.toTypedArray()) { which ->
             when(which) {
-                0 -> if(tile.id in favorites) favorites.remove(tile.id) else favorites.add(tile.id)
+                0 -> { beginMove(tile); return@glassMenu }
                 1 -> if(tile.id in hidden) hidden.remove(tile.id) else hidden.add(tile.id)
-                4 -> { chooseArt(tile, false); return@glassMenu }
-                5 -> { chooseArt(tile, true); return@glassMenu }
-                6 -> { asset(tile, "custom").delete(); asset(tile, "backdrop").delete() }
-                7 -> { rename(tile); return@glassMenu }
-                8 -> prefs.edit().remove("name_" + tile.id).apply()
-                2,3 -> {
-                    val i = list.indexOf(tile.id)
-                    val j = i + if(which == 2) -1 else 1
-                    if(i >= 0 && j in list.indices && (list[j] in favorites) == (tile.id in favorites)) {
-                        java.util.Collections.swap(list, i, j)
-                        order = (list + order.filterNot { it in list }).toMutableList()
-                    }
-                }
+                2 -> { rename(tile); return@glassMenu }
+                3 -> { chooseArt(tile,false); return@glassMenu }
+                4 -> { chooseArt(tile,true); return@glassMenu }
+                5 -> { asset(tile,"custom").delete(); asset(tile,"backdrop").delete() }
+                6 -> prefs.edit().remove("name_" + tile.id).apply()
+                7 -> { uninstall(tile); return@glassMenu }
             }
             save()
             refreshCards()
         }
     }
 
+    private fun canUninstall(tile:Tile):Boolean {
+        if(tile.id.startsWith("hdmi:") || tile.id.startsWith("builtin:") || tile.id==packageName) return false
+        return runCatching {
+            val info=packageManager.getApplicationInfo(tile.id,0)
+            (info.flags and (android.content.pm.ApplicationInfo.FLAG_SYSTEM or android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP))==0
+        }.getOrDefault(false)
+    }
+
+    private fun uninstall(tile:Tile) {
+        if(!canUninstall(tile)) return
+        val intent=Intent(Intent.ACTION_DELETE,android.net.Uri.fromParts("package",tile.id,null))
+            .putExtra(Intent.EXTRA_RETURN_RESULT,true)
+        runCatching { startActivityForResult(intent,232) }.onFailure {
+            Toast.makeText(this,t("Uygulama kaldırma ekranı açılamadı.","Could not open the uninstall screen."),Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun showSettings() {
-        val actions = arrayOf(if(demo) t("Demo modunu kapat", "Disable demo mode") else t("Demo modunu aç", "Enable demo mode"),
-            if(light) t("Koyu temaya geç", "Switch to dark theme") else t("Açık temaya geç", "Switch to light theme"),
-            if(showHidden) t("Gizli uygulamaları gizle", "Hide hidden applications") else t("Gizli uygulamaları göster", "Show hidden applications"),
-            t("Uygulamaları yenile", "Refresh applications"), t("Android ayarları", "Android settings"),
-            if (storeIcons) t("Apple TV mağaza ikonlarını kapat", "Disable Apple TV store icons") else t("Apple TV mağaza ikonlarını aç", "Enable Apple TV store icons"),
-            if (largeIcons) t("6 sütun", "6 columns") else t("5 büyük sütun", "5 large columns"), t("Varsayılan ana ekran seçimi", "Default home screen"), t("Dil  ·  Türkçe", "Language  ·  English"))
-        glassMenu(t("Başlatıcı ayarları", "Launcher settings"), actions) { which ->
+        if(expandedShelf) { expandedShelf=false; shelf.isFocusable=false; gridScroll.visibility=View.VISIBLE; shelfPlayer.expand(false) }
+        settings.requestFocus()
+        glassMenu(t("Ayarlar","Settings"),arrayOf(t("Genel  ›","General  ›"),t("Görünüm  ›","Appearance  ›"),
+            t("Uygulamalar  ›","Applications  ›"),t("Ana ekran  ›","Home screen  ›"),
+            t("Top Shelf durumu  ›","Top Shelf status  ›"),t("TV ayarları  ›","TV settings  ›"),t("Hava durumu • ","Weather • ")+weatherCity()+"  ›")) { which ->
             when(which) {
-                0 -> { demo = !demo; save(); refreshCards(); fetchStoreIcons() }
-                1 -> { light = !light; save(); buildHome() }
-                2 -> { showHidden = !showHidden; refreshCards() }
-                3 -> { apps = installed(); refreshCards(); fetchStoreIcons() }
-                5 -> { storeIcons = !storeIcons; save(); refreshCards(); fetchStoreIcons() }
-                6 -> { largeIcons = !largeIcons; save(); refreshCards() }
-                8 -> languageMenu()
-                7 -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_HOME_SETTINGS)) }
-                    .onFailure { Toast.makeText(this, t("TV yazılımı ana ekran seçimine izin vermiyor olabilir.", "TV firmware may not allow home screen selection."), Toast.LENGTH_LONG).show() }
-                4 -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_SETTINGS)) }
-                    .onFailure { Toast.makeText(this, t("Ayarlar açılamadı", "Could not open settings"), Toast.LENGTH_SHORT).show() }
+                0 -> generalSettings()
+                1 -> appearanceSettings()
+                2 -> applicationSettings()
+                3 -> homeSettings()
+                4 -> shelfDiagnostics()
+                5 -> openTvSettings()
+                6 -> weatherSettings()
             }
+        }
+    }
+    private fun generalSettings() {
+        glassMenu(t("Genel","General"),arrayOf(t("Dil","Language"),t("TV açılışında Canlı TV: ","Live TV on power on: ")+if(prefs.getBoolean("live_on_power",true)) t("Açık","On") else t("Kapalı","Off")), onBack={showSettings()}) { i ->
+            if(i==0) languageMenu() else { prefs.edit().putBoolean("live_on_power",!prefs.getBoolean("live_on_power",true)).apply(); generalSettings() }
+        }
+    }
+    private fun appearanceSettings() {
+        glassMenu(t("Görünüm","Appearance"),arrayOf(if(light) t("Koyu","Dark") else t("Açık","Light"),t("Görsel kalitesi","Image quality")+" · "+prefs.getString("art_quality","auto"),t("İçerik değişim süresi","Slide interval")+" · "+prefs.getInt("shelf_seconds",9)+" s"),onBack={showSettings()}) { i ->
+            when(i) {
+                0 -> { light=!light; save(); buildHome(); appearanceSettings() }
+                1 -> glassMenu(t("Görsel kalitesi","Image quality"),arrayOf(t("Otomatik","Auto"),"Full HD","4K"),onBack={appearanceSettings()}) { n -> prefs.edit().putString("art_quality",listOf("auto","fhd","4k")[n]).apply(); shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }); appearanceSettings() }
+                2 -> glassMenu(t("İçerik değişim süresi","Slide interval"),arrayOf("6 s","9 s","12 s","20 s"),onBack={appearanceSettings()}) { n -> prefs.edit().putInt("shelf_seconds",listOf(6,9,12,20)[n]).apply(); appearanceSettings() }
+            }
+        }
+    }
+    private fun applicationSettings() {
+        glassMenu(t("Uygulamalar","Applications"),arrayOf(
+            if(showHidden) t("Gizli uygulamaları gizle","Hide hidden apps") else t("Gizli uygulamaları göster","Show hidden apps"),
+            if(storeIcons) t("Apple TV ikonlarını kapat","Disable Apple TV icons") else t("Apple TV ikonlarını aç","Enable Apple TV icons"),
+            t("Uygulamaları yenile","Refresh apps"),t("Varsayılan sıralamayı geri yükle","Restore default layout"),t("Netflix katalog ayarları","Netflix catalog settings")),onBack={showSettings()}) { choice ->
+            when(choice) {
+                0 -> { showHidden=!showHidden; refreshCards() }
+                1 -> { storeIcons=!storeIcons; save(); refreshCards(); fetchStoreIcons() }
+                2 -> { apps=installed(); refreshCards(); fetchStoreIcons() }
+                3 -> { order.clear(); prefs.edit().putBoolean("custom_app_order",false).apply(); save(); refreshCards() }
+                4 -> { netflixSettings(); return@glassMenu }
+            }
+            applicationSettings()
+        }
+    }
+    private fun netflixSettings() {
+        val (dialog,_,items)=newGlassDialog(t("Netflix katalog ayarları","Netflix catalog settings"))
+        val explanation=text(t("Netflix Türkiye önerileri otomatik olarak JustWatch üzerinden alınır. API anahtarı gerekmez. JustWatch yanıt vermezse isteğe bağlı TMDB v3 anahtarı kullanılır. Katalog önerileri kişisel izleme geçmişi değildir.","Netflix Turkey recommendations use JustWatch automatically, without an API key. An optional TMDB v3 key is used if JustWatch returns no data. Catalogue recommendations are not your viewing history."),16f,Color.WHITE,false)
+        items.addView(explanation)
+        val field=EditText(this).apply {
+            hint="TMDB API key (v3)"
+            setText(prefs.getString("tmdb_api_key",""))
+            inputType=android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(0xffbbbbbb.toInt())
+            background=glass(false,15)
+        }
+        items.addView(field,LinearLayout.LayoutParams(-1,-2))
+        items.addView(menuRow(t("Kaydet","Save")) {
+            val key=field.text.toString().trim()
+            if(key.isEmpty()) prefs.edit().remove("tmdb_api_key").apply()
+            else prefs.edit().putString("tmdb_api_key",key).apply()
+            dialog.dismiss(); shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }); applicationSettings()
+        })
+        items.addView(menuRow(t("Anahtarı kaldır","Remove key")) {
+            prefs.edit().remove("tmdb_api_key").apply()
+            dialog.dismiss(); shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }); applicationSettings()
+        })
+        items.addView(text("This product uses the TMDB API but is not endorsed or certified by TMDB. Watch availability: JustWatch.",13f,Color.WHITE,false))
+        dialog.setOnCancelListener { dialog.dismiss(); applicationSettings() }
+        presentGlass(dialog)
+    }
+    private fun homeSettings() {
+        val home=Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        val current=packageManager.resolveActivity(home,android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+        val resolved=current?.activityInfo?.packageName.orEmpty()
+        val isDefault=resolved==packageName
+        val roles=if(android.os.Build.VERSION.SDK_INT>=29) getSystemService(android.app.role.RoleManager::class.java) else null
+        val roleHeld=if(android.os.Build.VERSION.SDK_INT>=29) runCatching { roles?.isRoleHeld(android.app.role.RoleManager.ROLE_HOME)==true }.getOrDefault(false) else false
+        val helper=runCatching {
+            getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+                ?.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                ?.any { it.resolveInfo.serviceInfo.packageName==packageName && it.resolveInfo.serviceInfo.name==HomeRedirectService::class.java.name }==true
+        }.getOrDefault(false)
+        val status=if(isDefault) "TVOS Launcher" else resolved.ifBlank { "—" }
+        glassMenu(t("Ana ekran","Home screen"),arrayOf(
+            t("Varsayılan: ","Default: ")+status,
+            "HOME role: "+if(roleHeld) t("verildi","granted") else t("verilmedi","not granted"),
+            t("Varsayılan başlatıcı seç","Choose default launcher"),
+            t("Yardımcı: ","Helper: ")+when { HomeRedirectService.connected -> t("bağlı","connected"); helper -> t("etkin, bağlantı yok","enabled, not connected"); else -> t("kapalı","disabled") },
+            t("Erişilebilirlik / ADB kurulum rehberi","Accessibility / ADB setup guide"),
+            "Android "+android.os.Build.VERSION.RELEASE+" • SDK "+android.os.Build.VERSION.SDK_INT,
+            t("Home dönüş odağı","Home return focus"),
+            t("Kanal logosu: ","Channel logo: ")+if(ChannelLogoService.connected) t("bağlı","connected") else t("kapalı","disabled")),
+            onBack={showSettings()}) { choice ->
+            when(choice) {
+                2 -> {
+                    val launched=runCatching {
+                        if(android.os.Build.VERSION.SDK_INT>=29 && roles!=null && roles.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME) && !roleHeld) {
+                            startActivityForResult(roles.createRequestRoleIntent(android.app.role.RoleManager.ROLE_HOME),231)
+                            true
+                        } else false
+                    }.getOrDefault(false)
+                    if(!launched) {
+                        homeSettings()
+                        openSystemSettings(android.provider.Settings.ACTION_HOME_SETTINGS)
+                    }
+                }
+                4 -> {
+                    accessibilitySettingsGuide()
+                }
+                7 -> android.app.AlertDialog.Builder(this).setTitle(t("Kanal logosu","Channel logo"))
+                    .setMessage(t("İsteğe bağlı servis yalnızca TCL Canlı TV kanal adını ve numarasını okur. Bilgi cihazda tutulur. Etkinleştirmek için erişilebilirlik ayarlarında TVOS — Kanal logosu servisini açın. Home servisini açık bırakın.","Optional service reads only the TCL Live TV channel name and number. Data stays on device. Enable TVOS — Channel logo in Accessibility settings; keep the Home service enabled."))
+                    .setPositiveButton(t("Ayarları aç","Open settings")) { _,_ -> openSystemSettings(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS) }
+                    .setNegativeButton(t("İptal","Cancel"),null).show()
+                6 -> glassMenu(t("Home dönüş odağı","Home return focus"),arrayOf(t("İlk kart","First card"),t("Son açılan uygulama","Last opened app"),t("Son odaklanan kart","Last focused card")),onBack={homeSettings()}) { n -> prefs.edit().putString("return_focus",listOf("first","opened","last")[n]).apply(); homeSettings() }
+                else -> homeSettings()
+            }
+        }
+    }
+    private fun accessibilitySettingsGuide() {
+        glassMenu(t("Erişilebilirlik","Accessibility"),arrayOf(
+            t("Sistem ayarını aç","Open system settings"),
+            t("ADB ile etkinleştirme komutları","ADB setup commands"),
+            t("Servis durumu (ADB)","Service status (ADB)")),onBack={homeSettings()}) { choice ->
+            when(choice) {
+                0 -> if(!openSystemSettings(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) accessibilitySettingsGuide()
+                1 -> android.app.AlertDialog.Builder(this).setTitle(t("ADB kurulum","ADB setup")).setMessage(
+                    "adb shell am start -n com.tvos.launcher/.MainActivity\n\nadb shell appops set com.tvos.launcher APP_AUTO_START allow\n\nadb shell settings put secure enabled_accessibility_services com.tvos.launcher/com.tvos.launcher.HomeRedirectService\n\nadb shell settings put secure accessibility_enabled 1\n\n"+
+                    t("Başka erişilebilirlik servisleri varsa mevcut listeyi koruyarak ekleyin.","Preserve any other enabled accessibility services."))
+                    .setPositiveButton("OK") { _,_ -> accessibilitySettingsGuide() }.show()
+                else -> android.app.AlertDialog.Builder(this).setTitle("ADB").setMessage("adb shell dumpsys accessibility\n\nadb shell cmd appops get com.tvos.launcher")
+                    .setPositiveButton("OK") { _,_ -> accessibilitySettingsGuide() }.show()
+            }
+        }
+    }
+
+    private fun openSystemSettings(action:String):Boolean {
+        val intent=Intent(action)
+        val candidates=packageManager.queryIntentActivities(intent,android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+        val chosen=candidates.firstOrNull {
+            val a=it.activityInfo
+            a.packageName in setOf("com.android.tv.settings","com.android.settings","com.google.android.tv.settings","com.tcl.settings") ||
+                a.packageName.contains("settings",true)
+        }
+        if(chosen!=null) intent.setClassName(chosen.activityInfo.packageName,chosen.activityInfo.name)
+        else {
+            val resolved=intent.resolveActivity(packageManager)
+            if(resolved==null || resolved.packageName in setOf("com.google.android.apps.tv.launcherx","com.google.android.tvlauncher")) {
+                Toast.makeText(this,t("Bu sistem ayarı TV yazılımında doğrudan açılamıyor.","This system setting is not directly available on this TV."),Toast.LENGTH_LONG).show()
+                return false
+            }
+        }
+        return runCatching { startActivity(intent); true }.getOrElse {
+            Toast.makeText(this,t("Sistem ayarı açılamadı.","Could not open system settings."),Toast.LENGTH_LONG).show()
+            false
+        }
+    }
+    private fun openTvSettings() {
+        glassMenu(t("TV ayarları","TV settings"),arrayOf(t("Cihaz ayarlarını aç","Open device settings"),
+            t("Ağ ve internet","Network and internet"),t("Erişilebilirlik","Accessibility"),t("Cihaz bilgileri","Device information")),onBack={showSettings()}) { choice ->
+            if(choice==2) { accessibilitySettingsGuide(); return@glassMenu }
+            openTvSettings()
+            openSystemSettings(when(choice) {
+                1 -> android.provider.Settings.ACTION_WIFI_SETTINGS
+                2 -> android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS
+                3 -> android.provider.Settings.ACTION_DEVICE_INFO_SETTINGS
+                else -> android.provider.Settings.ACTION_SETTINGS
+            })
+        }
+    }
+    private fun shelfDiagnostics() {
+        val granted=checkSelfPermission("android.permission.READ_TV_LISTINGS")==android.content.pm.PackageManager.PERMISSION_GRANTED
+        val permission=t("TV veri erişimi: ","TV data access: ")+if(granted) t("İzin verildi","Granted") else t("İzin gerekli","Permission required")
+        val entries=tiles().take(columns).map { tile ->
+            displayName(tile)+"  ·  "+if(tile.id.startsWith("hdmi:")) tile.subtitle else shelfPlayer.status(tile.id)
+        }.ifEmpty { listOf(t("Uygulama yok","No apps")) }
+        glassMenu(t("Top Shelf • IMG: görsel / VID: video","Top Shelf • IMG: image / VID: video"),(listOf(permission)+entries).toTypedArray(),onBack={showSettings()}) { choice ->
+            if(choice==0 && !granted) {
+                runCatching { requestPermissions(arrayOf("android.permission.READ_TV_LISTINGS"),230) }
+                android.app.AlertDialog.Builder(this).setTitle(t("TV veri erişimi","TV data access"))
+                    .setMessage(t("TV izin ekranı açılmazsa bilgisayarda şu komutu çalıştırın:","If the permission screen is unavailable, run this command on your computer:")+"\n\nadb shell pm grant com.tvos.launcher android.permission.READ_TV_LISTINGS")
+                    .setPositiveButton("OK") { _,_ -> shelfDiagnostics() }.show()
+            } else shelfDiagnostics()
         }
     }
 
@@ -637,11 +1421,7 @@ class MainActivity : Activity() {
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18),dp(16),dp(18),dp(16))
-            background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                intArrayOf(0xeb536477.toInt(),0xeb273444.toInt(),0xf0182332.toInt())).apply {
-                cornerRadius = dp(30).toFloat()
-                setStroke(dp(1),0x88ffffff.toInt())
-            }
+            background = LiquidGlassDrawable(this,glassSource,dp(30).toFloat(),dark=true)
         }
         val heading = text(title, 24f, Color.WHITE, true).apply {
             setPadding(dp(10),dp(3),dp(10),dp(15))
@@ -669,7 +1449,14 @@ class MainActivity : Activity() {
         val height = (metrics.heightPixels * .86f).roundToInt()
         win.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        win.setDimAmount(.25f)
+        win.setDimAmount(.15f)
+        if(android.os.Build.VERSION.SDK_INT >= 31) {
+            win.setBackgroundBlurRadius(dp(26))
+            win.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+            val blurAttrs = win.attributes
+            blurAttrs.blurBehindRadius = dp(12)
+            win.attributes = blurAttrs
+        }
         win.setLayout(width,height)
         win.setGravity(Gravity.TOP or Gravity.END)
         val attrs = win.attributes
@@ -685,16 +1472,17 @@ class MainActivity : Activity() {
             isClickable = true
             setPadding(dp(14),dp(9),dp(14),dp(9))
             minHeight = dp(40)
-            background = rounded(0x18ffffff, 15)
+            background = rounded(Color.TRANSPARENT, 15)
             setOnFocusChangeListener { v, focused ->
-                v.background = if (focused) glass(true, 15) else rounded(0x18ffffff,15)
+                v.background = if (focused) glass(true, 15) else rounded(Color.TRANSPARENT,15)
                 setTextColor(if (focused) 0xff101b29.toInt() else Color.WHITE)
             }
             setOnClickListener { onClick() }
         }
 
-    private fun glassMenu(title: String, actions: Array<String>, action: (Int) -> Unit) {
+    private fun glassMenu(title: String, actions: Array<String>, onBack: (() -> Unit)? = null, action: (Int) -> Unit) {
         val (dialog, _, items) = newGlassDialog(title)
+        if(onBack!=null) dialog.setOnCancelListener { dialog.dismiss(); onBack() }
         var first: View? = null
         actions.forEachIndexed { index, label ->
             val row = menuRow(label) { dialog.dismiss(); action(index) }
@@ -709,11 +1497,12 @@ class MainActivity : Activity() {
         glassMenu(t("Dil", "Language"), arrayOf(
             (if (!english) "✓  " else "") + "Türkçe",
             (if (english) "✓  " else "") + "English"
-        )) { choice ->
+        ),onBack={generalSettings()}) { choice ->
             english = choice == 1
             save()
             apps = installed()
             buildHome()
+            generalSettings()
         }
     }
 
@@ -721,6 +1510,8 @@ class MainActivity : Activity() {
         val (dialog, _, items) = newGlassDialog(t("Uygulama adını değiştir", "Rename application"))
         val field = EditText(this).apply {
             setText(displayName(tile))
+            typeface = uiFont(false)
+            letterSpacing = -0.015f
             setTextColor(Color.WHITE)
             setSingleLine(true)
             setPadding(dp(12),dp(12),dp(12),dp(12))
@@ -739,53 +1530,35 @@ class MainActivity : Activity() {
         field.requestFocus()
     }
 
-    private inner class ShelfArt : View(this@MainActivity) {
-        var tile: Tile? = null
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            val w = width.toFloat()
-            val h = height.toFloat()
-            if(w <= 0 || h <= 0) return
-            val color = tile?.color ?: 0xff245487.toInt()
-            paint.shader = RadialGradient(w*0.65f,h*0.48f,h*1.1f,
-                intArrayOf(blend(color, Color.WHITE, .42f),color, Color.TRANSPARENT),
-                floatArrayOf(0f,.42f,1f), Shader.TileMode.CLAMP)
-            canvas.drawRect(0f,0f,w,h,paint)
-            paint.shader = null
-            for(i in 0..4) {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = h*.065f
-                paint.color = Color.argb(25+i*7,255,255,255)
-                val offset = i*h*.14f
-                canvas.drawCircle(w*.76f,h*.56f,h*.36f+offset,paint)
+    private class SettingsGear(private val tintColor:Int):Drawable() {
+        private val p=Paint(Paint.ANTI_ALIAS_FLAG)
+        override fun draw(canvas:Canvas) {
+            val w=bounds.width().toFloat(); val h=bounds.height().toFloat()
+            if(w<=0 || h<=0) return
+            val size=minOf(w,h)
+            canvas.save()
+            canvas.translate(bounds.exactCenterX(),bounds.exactCenterY())
+            p.color=tintColor
+            val gear=Path().apply { fillType=Path.FillType.EVEN_ODD }
+            val teeth=14
+            for(i in 0 until teeth*4) {
+                val ang=2.0*Math.PI*i/(teeth*4)-Math.PI/2
+                val r=size*(if(i%4==1 || i%4==2) .48f else .40f)
+                val x=(kotlin.math.cos(ang)*r).toFloat()
+                val y=(kotlin.math.sin(ang)*r).toFloat()
+                if(i==0) gear.moveTo(x,y) else gear.lineTo(x,y)
             }
-            paint.style = Paint.Style.FILL
-            val side = h*.61f
-            val cx = w*.62f
-            val cy = h*.49f
-            val rect = RectF(cx-side/2,cy-side/2,cx+side/2,cy+side/2)
-            paint.color = blend(color,Color.BLACK,.27f)
-            canvas.drawRoundRect(rect,h*.12f,h*.12f,paint)
-            val image = tile?.let { artwork(it) } ?: tile?.banner ?: tile?.icon
-            if(image != null) {
-                val pad = side*.12f
-                val available = side-2*pad
-                val iw = image.intrinsicWidth.coerceAtLeast(1).toFloat()
-                val ih = image.intrinsicHeight.coerceAtLeast(1).toFloat()
-                val scale = minOf(available/iw,available/ih)
-                val dw = iw*scale; val dh = ih*scale
-                val original = Rect(image.bounds)
-                image.setBounds((cx-dw/2).toInt(),(cy-dh/2).toInt(),(cx+dw/2).toInt(),(cy+dh/2).toInt())
-                image.draw(canvas)
-                image.bounds = original
-            } else {
-                paint.color = Color.WHITE
-                paint.textSize = side*.18f
-                paint.typeface = Typeface.create("sans-serif-medium",Typeface.NORMAL)
-                paint.textAlign = Paint.Align.CENTER
-                canvas.drawText(tile?.symbol ?: "▶",cx,cy-(paint.ascent()+paint.descent())/2,paint)
-            }
+            gear.close()
+            gear.addCircle(0f,0f,size*.23f,Path.Direction.CW)
+            canvas.drawPath(gear,p)
+            canvas.drawCircle(0f,0f,size*.13f,p)
+            canvas.restore()
         }
+        override fun setAlpha(alpha:Int) { p.alpha=alpha }
+        override fun setColorFilter(filter:ColorFilter?) { p.colorFilter=filter }
+        @Suppress("DEPRECATION")
+        override fun getOpacity()=PixelFormat.TRANSLUCENT
+        override fun getIntrinsicWidth()=96
+        override fun getIntrinsicHeight()=96
     }
 }

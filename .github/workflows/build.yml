@@ -82,8 +82,18 @@ jobs:
                 applicationId = "com.tvos.launcher"
                 minSdk = 28
                 targetSdk = 34
-                versionCode = 4
-                versionName = "2.2-beta.1"
+                versionCode = 24
+                versionName = "2.3-beta.20"
+            }
+
+            signingConfigs {
+                getByName("debug") {
+                    storeFile = file(System.getenv("TVOS_KEYSTORE_PATH") ?: error("Missing signing keystore"))
+                    storePassword = System.getenv("TVOS_KEYSTORE_PASSWORD") ?: error("Missing signing password")
+                    keyAlias = "tvos"
+                    keyPassword = System.getenv("TVOS_KEYSTORE_PASSWORD") ?: error("Missing signing password")
+                    storeType = "PKCS12"
+                }
             }
 
             buildTypes {
@@ -134,9 +144,95 @@ jobs:
       uses: gradle/actions/setup-gradle@v4
       with:
         gradle-version: '8.7'
+ 
+    - name: Inter Font Kurulumu
+      run: |
+        mkdir -p app/src/main/assets/fonts
+        curl -fL --retry 3 https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip -o /tmp/inter.zip
+        unzip -j -o /tmp/inter.zip "extras/ttf/Inter-Regular.ttf" "extras/ttf/Inter-Medium.ttf" "LICENSE.txt" -d app/src/main/assets/fonts
 
-    - name: Debug APK Oluştur
-      run: gradle :app:assembleDebug
+
+    - name: Türkiye kanal logo dizini
+      run: |
+        mkdir -p app/src/main/assets
+        python3 - <<'PY'
+        import json, urllib.request
+        from pathlib import Path
+        dest = Path("app/src/main/assets/turkish_channel_logos.json")
+        try:
+            def fetch(name):
+                url = "https://iptv-org.github.io/api/" + name + ".json"
+                with urllib.request.urlopen(url, timeout=35) as r:
+                    return json.load(r)
+            channels = {c["id"]: c for c in fetch("channels")
+                        if c.get("country") == "TR" and not c.get("is_nsfw") and not c.get("closed")}
+            best = {}
+            for logo in fetch("logos"):
+                cid = logo.get("channel")
+                url = logo.get("url") or ""
+                if cid not in channels or not logo.get("in_use") or not url.startswith("https://"):
+                    continue
+                if str(logo.get("format", "")).upper() not in ("PNG", "JPEG", "WEBP"):
+                    continue
+                score = (not bool(logo.get("feed")), "horizontal" in (logo.get("tags") or []),
+                         min(1200, logo.get("width") or 0))
+                if cid not in best or score > best[cid][0]:
+                    best[cid] = (score, url)
+            data = [{"name": channels[cid]["name"], "aliases": channels[cid].get("alt_names") or [], "url": entry[1]}
+                    for cid, entry in best.items()]
+            dest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            print("Turkish channel logo entries:", len(data))
+        except Exception as exc:
+            print("Optional channel catalog unavailable:", exc)
+            dest.write_text("[]", encoding="utf-8")
+        PY
+    - name: Excel kaynaklı yerel kanal logolarını paketle
+      run: |
+        python3 - <<'PY'
+        import json, re, zipfile
+        from pathlib import Path
+        archive = Path("turkish_channel_logos.zip")
+        assets = Path("app/src/main/assets")
+        if not archive.is_file():
+            print("Local channel logo ZIP not uploaded; use online catalog.")
+        else:
+            with zipfile.ZipFile(archive) as z:
+                data = json.loads(z.read("user_channel_logos.json"))
+                count = 0
+                for row in data:
+                    asset = row.get("asset", "")
+                    if not re.fullmatch(r"channel_logos/[0-9]{4}\.png", asset):
+                        row.pop("asset", None)
+                        continue
+                    info = z.getinfo(asset)
+                    if info.file_size > 2000000:
+                        raise ValueError("Oversized logo")
+                    dest = assets / asset
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(z.read(info))
+                    count += 1
+                (assets / "user_channel_logos.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                print(f"Workbook catalog: {len(data)} channels, {count} embedded logos.")
+        PY
+    - name: Kalıcı imzalı APK oluştur
+      env:
+        TVOS_KEYSTORE_BASE64: ${{ secrets.TVOS_KEYSTORE_BASE64 }}
+        TVOS_KEYSTORE_PASSWORD: ${{ secrets.TVOS_KEYSTORE_PASSWORD }}
+      run: |
+        set -euo pipefail
+        if [ -z "$TVOS_KEYSTORE_BASE64" ] || [ -z "$TVOS_KEYSTORE_PASSWORD" ]; then
+          echo "::error::Configure TVOS_KEYSTORE_BASE64 and TVOS_KEYSTORE_PASSWORD in repository Actions secrets. Refusing to generate a new debug signing key."
+          exit 1
+        fi
+        umask 077
+        export TVOS_KEYSTORE_PATH="$RUNNER_TEMP/tvos-signing.p12"
+        trap 'rm -f "$TVOS_KEYSTORE_PATH"' EXIT
+        printf '%s' "$TVOS_KEYSTORE_BASE64" | base64 --decode > "$TVOS_KEYSTORE_PATH"
+        unset TVOS_KEYSTORE_BASE64
+        gradle --no-daemon :app:assembleDebug
+        SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+        APKSIGNER="$(find "$SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -1)"
+        "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk
 
     - name: APK Dosyasını Yükle
       uses: actions/upload-artifact@v5
