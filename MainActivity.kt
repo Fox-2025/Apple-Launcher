@@ -875,7 +875,6 @@ class MainActivity : Activity() {
     }
 
     private fun refreshCards() {
-        val oldPositions=if(movingId!=null) cardViews.mapValues { (_,v) -> IntArray(2).also { v.getLocationOnScreen(it) } } else emptyMap()
         rows.removeAllViews()
         cardViews.clear()
         val data = tiles()
@@ -913,14 +912,6 @@ class MainActivity : Activity() {
         val selected = data.firstOrNull { it.id == selectedId } ?: data.first()
         updateShelf(selected)
         cardViews[selected.id]?.post { cardViews[selected.id]?.requestFocus() }
-        if(oldPositions.isNotEmpty()) rows.post {
-            for((id,v) in cardViews) {
-                val old=oldPositions[id] ?: continue
-                val loc=IntArray(2); v.getLocationOnScreen(loc)
-                v.translationX=(old[0]-loc[0]).toFloat(); v.translationY=(old[1]-loc[1]).toFloat()
-                v.animate().translationX(0f).translationY(0f).setDuration(190).start()
-            }
-        }
     }
 
     private fun createCard(tile: Tile, height: Int): View {
@@ -983,10 +974,12 @@ class MainActivity : Activity() {
         holder.setOnLongClickListener { if(movingId == null) edit(tile); true }
         holder.setOnFocusChangeListener { view, focus ->
             val lifted=if(movingId!=null) movingId==tile.id else focus
-            val scale=if(lifted) (if(movingId!=null) 1.07f else 1.10f) else 1f
-            view.animate().cancel(); view.animate().scaleX(scale).scaleY(scale).setInterpolator(android.view.animation.PathInterpolator(0.2f,0f,0.2f,1f)).setDuration(if(lifted) 230L else 170L).start()
-            view.translationZ = if(lifted) dp(10).toFloat() else 0f
-            panel.elevation = if(lifted) dp(8).toFloat() else dp(3).toFloat()
+            val moving=movingId!=null
+            val scale=if(lifted && !moving) 1.10f else 1f
+            view.animate().cancel()
+            if(moving) { view.scaleX=1f; view.scaleY=1f } else view.animate().scaleX(scale).scaleY(scale).setInterpolator(android.view.animation.PathInterpolator(0.2f,0f,0.2f,1f)).setDuration(if(lifted) 230L else 170L).start()
+            view.translationZ = if(lifted && !moving) dp(10).toFloat() else 0f
+            panel.elevation = if(lifted && !moving) dp(8).toFloat() else dp(3).toFloat()
             border.background = focusBorder(lifted)
             label.setTextColor(if(lifted) Color.WHITE else Color.TRANSPARENT)
             if (focus) { selectedId = tile.id; updateShelf(tile) }
