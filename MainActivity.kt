@@ -236,6 +236,7 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         immersive()
         prefs = getSharedPreferences("launcher_prefs", MODE_PRIVATE)
+        BootSession.observe(this)
         favorites = readList("favorites")
         order = readList("tile_order")
         if(!prefs.getBoolean("preferred_layout_v1",false)) {
@@ -272,6 +273,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        HomeRedirectService.observeLauncher(this)
         immersive()
         refreshWeather()
         if(!inputCallbackRegistered) runCatching {
