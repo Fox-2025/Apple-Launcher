@@ -18,9 +18,9 @@ jobs:
         mkdir -p app/src/main/java/com/tvos/launcher
         mkdir -p app/src/main/res/layout
 
-        cp -f *.kt app/src/main/java/com/tvos/launcher/
-        cp -f AndroidManifest.xml app/src/main/AndroidManifest.xml
-        cp -f item_app.xml app/src/main/res/layout/item_app.xml
+        cp -f *.kt* app/src/main/java/com/tvos/launcher/
+        cp -f *AndroidManifest* app/src/main/AndroidManifest.xml
+        cp -f *item_app* app/src/main/res/layout/item_app.xml
         cp -rf res/* app/src/main/res/
 
         rm -f build.gradle build.gradle.kts app/build.gradle app/build.gradle.kts
