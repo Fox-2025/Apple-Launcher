@@ -3,45 +3,68 @@ package com.tvos.launcher
 import android.accessibilityservice.AccessibilityService
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
-/** Optional, separately enabled. Reads only the TCL current-channel fields, never remote keys. */
+/** Separately enabled by the user. Reads only verified TCL channel fields. */
 class ChannelLogoService : AccessibilityService() {
     private val handler=Handler(Looper.getMainLooper())
-    private val retry=Runnable { capture() }
+    private var until=0L
+    private var targetWindow=-1
+    private var retryPending=false
+    private val retry=object:Runnable {
+        override fun run() {
+            retryPending=false
+            if(!connected) return
+            capture()
+            if(SystemClock.uptimeMillis()<until) { retryPending=true; handler.postDelayed(this,100L) }
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         connected=true
-        lastChannel=null
+        publish(null)
+        android.util.Log.i("ChannelLogo","SERVICE connected")
         capture()
     }
 
     override fun onAccessibilityEvent(event:AccessibilityEvent?) {
         if(event?.packageName?.toString()!=TV) return
-        // Read the visible channel banner immediately, then retry once after the UI settles.
+        targetWindow=event.windowId
+        // Do not cancel an already scheduled sample when TCL emits repeated events.
+        // Sample throughout the short tune transition, not just its first frame.
+        until=SystemClock.uptimeMillis()+2200L
         capture()
-        handler.removeCallbacks(retry)
-        handler.postDelayed(retry,180L)
+        if(!retryPending) { retryPending=true; handler.postDelayed(retry,100L) }
     }
 
     private fun capture() {
-        val root=runCatching { rootInActiveWindow }.getOrNull() ?: return
+        // The channel banner can be a separate TV overlay window.
+        val roots=mutableListOf<AccessibilityNodeInfo>()
+        runCatching { rootInActiveWindow?.let { roots.add(it) } }
+        runCatching {
+            val ws=windows.orEmpty()
+            try {
+                for(w in ws.sortedByDescending { it.id==targetWindow }) {
+                    if(w.id==targetWindow || w.isActive || w.isFocused) w.root?.let { roots.add(it) }
+                }
+            } finally { ws.forEach { it.recycle() } }
+        }
         try {
-            if(root.packageName?.toString()!=TV) return
-            val name=read(root,"tvCurChannelName")
-            val number=read(root,"tvCurChannelNum")
-            if(name.isNullOrBlank() || number.isNullOrBlank() || !number.matches(Regex("[0-9]{1,6}(?:[.-][0-9]{1,4})?"))) return
-            if(name.length>100) return
-            val next=Channel(name,number)
-            if(lastChannel!=next) {
-                lastChannel=next
-                android.util.Log.i("ChannelLogo","Current TCL channel captured: "+number+" "+name)
+            for(root in roots) {
+                if(root.packageName?.toString()!=TV) continue
+                val name=read(root,"tvCurChannelName")
+                val number=read(root,"tvCurChannelNum")
+                if(name.isNullOrBlank() || number.isNullOrBlank() || !number.matches(Regex("[0-9]{1,6}(?:[.-][0-9]{1,4})?"))) continue
+                if(name.length>100) continue
+                publish(Channel(name,number))
+                return
             }
         } catch(e:Exception) {
             android.util.Log.d("ChannelLogo","Channel banner unavailable: "+e.javaClass.simpleName)
-        } finally { root.recycle() }
+        } finally { roots.forEach { it.recycle() } }
     }
 
     private fun read(root:AccessibilityNodeInfo,id:String):String? {
@@ -52,12 +75,15 @@ class ChannelLogoService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+    private fun disconnected() {
+        handler.removeCallbacksAndMessages(null); retryPending=false; connected=false; publish(null)
+    }
     override fun onUnbind(intent:android.content.Intent?):Boolean {
-        handler.removeCallbacksAndMessages(null); connected=false; lastChannel=null
+        disconnected()
         return super.onUnbind(intent)
     }
     override fun onDestroy() {
-        handler.removeCallbacksAndMessages(null); connected=false; lastChannel=null
+        disconnected()
         super.onDestroy()
     }
 
@@ -67,6 +93,16 @@ class ChannelLogoService : AccessibilityService() {
         @Volatile var connected=false
             private set
         @Volatile private var lastChannel:Channel?=null
+        private val listeners=linkedSetOf<()->Unit>()
+        // All listener registration and publishing occur on the main thread.
+        fun addListener(listener:()->Unit) { listeners.add(listener) }
+        fun removeListener(listener:()->Unit) { listeners.remove(listener) }
+        private fun publish(next:Channel?) {
+            if(lastChannel==next) return
+            lastChannel=next
+            if(next!=null) android.util.Log.i("ChannelLogo","Current TCL channel captured: "+next.number+" "+next.name+" uptime="+SystemClock.elapsedRealtime())
+            listeners.toList().forEach { it() }
+        }
         fun current():Channel? = if(connected) lastChannel else null
     }
 }
