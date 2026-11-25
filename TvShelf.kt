@@ -140,45 +140,29 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     }
 
     private fun liveChannel(pkg:String):Item? {
-        val resolver=context.contentResolver
         val en=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
-        if(pkg=="com.tcl.tv") {
-            // TCL does not expose its active channel to this launcher through the tested providers.
-            // A cached URI or first channel is not the current channel; never display it as such.
-            android.util.Log.i("TvShelf","LIVE actual TCL channel not available; native resume")
-            return Item(if(en) "Live TV" else "Canlı TV",if(en) "Open the last channel in the TV app" else "Son izlenen kanalı TV uygulamasında aç",null,null,true)
-        }
-        val u=LiveTuner.channel(context) ?: return null
-        var name=""
+        val actual=if(pkg=="com.tcl.tv") ChannelLogoService.current() else null
+        if(actual==null) return Item(if(en) "Live TV" else "Canlı TV",if(en) "Open the last channel in the TV app" else "Son izlenen kanalı TV uygulamasında aç",null,null,true)
+        val key=normalizeChannel(actual.name)
+        val candidate=channelCatalog[key]
+        var providerLogo:Uri?=null
+        // Require both the displayed name and number. Never choose a previous or first channel.
         runCatching {
-            resolver.query(u,arrayOf("display_name","display_number"),null,null,null)?.use { c ->
-                if(c.moveToFirst()) name=c.getString(0).orEmpty().ifBlank { c.getString(1).orEmpty() }
-            }
-        }
-        if(name.isBlank()) return null
-        val candidate=channelCatalog[normalizeChannel(name)]
-        val now=System.currentTimeMillis()
-        var current:String?=null
-        var next:String?=null
-        var nextAt=Long.MAX_VALUE
-        runCatching {
-            val programs=android.media.tv.TvContract.buildProgramsUriForChannel(u,now,now+12*60*60*1000L)
-            resolver.query(programs,arrayOf("title","start_time_utc_millis","end_time_utc_millis"),null,null,null)?.use { c ->
+            context.contentResolver.query(android.media.tv.TvContract.Channels.CONTENT_URI,
+                arrayOf("_id","display_name","display_number","input_id","type"),null,null,null)?.use { c ->
+                var match:Long?=null
+                var ambiguous=false
                 while(c.moveToNext()) {
-                    val title=c.getString(0)?.takeIf { it.isNotBlank() } ?: continue
-                    val start=c.getLong(1); val end=c.getLong(2)
-                    if(start<=now && end>now) current=title
-                    if(start>now && start<nextAt) { next=title; nextAt=start }
+                    if(c.getString(3)?.startsWith("com.tcl.tvinput/")!=true || c.getString(4)=="TYPE_PREVIEW") continue
+                    if(normalizeChannel(c.getString(1).orEmpty())!=key || c.getString(2)?.trim()!=actual.number) continue
+                    if(match!=null) { ambiguous=true; break }
+                    match=c.getLong(0)
                 }
+                if(!ambiguous) match?.let { providerLogo=android.media.tv.TvContract.buildChannelLogoUri(it) }
             }
-        }.onFailure { android.util.Log.i("TvShelf","EPG unavailable "+it.javaClass.simpleName) }
-        val details=mutableListOf<String>()
-        details.add(if(en) "Live TV" else "Canlı TV")
-        current?.let { details.add((if(en) "Now: " else "Şimdi: ")+it) }
-        next?.let { details.add((if(en) "Next: " else "Sırada: ")+java.text.SimpleDateFormat("HH:mm",java.util.Locale.getDefault()).format(java.util.Date(nextAt))+" · "+it) }
-        if(current==null && next==null) details.add(if(en) "Programme information unavailable" else "Yayın bilgisi mevcut değil")
-        android.util.Log.i("TvShelf","EPG current="+(current!=null)+" next="+(next!=null)+" logoCatalog="+(candidate!=null))
-        return Item(name,details.joinToString("\n"),android.media.tv.TvContract.buildChannelLogoUri(u),null,true,candidate?.uri,candidate?.online,link=u)
+        }
+        android.util.Log.i("TvShelf","LIVE channel="+actual.number+" "+actual.name+" catalog="+(candidate!=null)+" provider="+(providerLogo!=null))
+        return Item(actual.name,(if(en) "Live TV" else "Canlı TV")+" · "+actual.number,providerLogo,null,true,candidate?.uri,candidate?.online)
     }
 
     // Catalogue fallback inspired by Hume Launcher (Apache-2.0).
