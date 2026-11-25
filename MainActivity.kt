@@ -752,7 +752,7 @@ class MainActivity : Activity() {
                         backdropImage.animate().cancel(); backdropImage.setImageBitmap(bitmap); fitArtwork()
                         backdropImage.alpha=.72f; backdropImage.animate().alpha(1f).setDuration(240).start()
                     }
-                    backdropTint.background=GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,intArrayOf(0xff101823.toInt(),0xbb101823.toInt(),0x00101823,0x00101823))
+                    backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
                 }
                 glassSource.invalidate()
             }
@@ -806,7 +806,9 @@ class MainActivity : Activity() {
         header.addView(settings, LinearLayout.LayoutParams(dp(48), dp(36)))
         root.addView(header, LinearLayout.LayoutParams(-1, dp(36)))
         homeHeader=header
-        header.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0xff101823.toInt(),0xdd101823.toInt()))
+        header.background=null
+        weatherText.setShadowLayer(dp(3).toFloat(),0f,dp(1).toFloat(),Color.BLACK)
+        clock.setShadowLayer(dp(3).toFloat(),0f,dp(1).toFloat(),Color.BLACK)
 
         shelf = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -865,7 +867,7 @@ class MainActivity : Activity() {
         moveHint.setPadding(dp(10),dp(6),dp(10),dp(6))
         moveHint.visibility = View.GONE
         root.addView(moveHint, LinearLayout.LayoutParams(-1,-2))
-        shelf.addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() }
+        homeHeader.addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() }
         root.addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> fitArtwork() }
         refreshCards()
     }
@@ -991,26 +993,24 @@ class MainActivity : Activity() {
     }
 
     private fun fitArtwork() {
-        if(!::backdropImage.isInitialized || !::shelf.isInitialized || !::homeHeader.isInitialized) return
+        if(!::backdropImage.isInitialized || !::homeHeader.isInitialized) return
         val w=backdropImage.width; val h=backdropImage.height
-        if(w<=0 || h<=0 || shelf.width<=0 || shelf.height<=0) return
-        val origin=IntArray(2); val hero=IntArray(2)
-        backdropImage.getLocationInWindow(origin); shelf.getLocationInWindow(hero)
-        val top=(hero[1]-origin[1]).coerceIn(0,h)
-        val bottom=if(expandedShelf) h-dp(12) else (top+shelf.height).coerceAtMost(h)
-        val left=if(expandedShelf) dp(24) else (w*.43f).roundToInt()
-        val right=w-dp(24)
-        if(bottom<=top || right<=left) return
-        val area=Rect(left,top,right,bottom)
-        backdropImage.clipBounds=area
+        if(w<=0 || h<=0) return
+        val prime=shelfKey in setOf("com.amazon.amazonvideo.livingroom","com.amazon.avod.thirdpartyclient")
+        val origin=IntArray(2); val header=IntArray(2)
+        backdropImage.getLocationInWindow(origin); homeHeader.getLocationInWindow(header)
+        val top=if(prime) (header[1]-origin[1]+homeHeader.height+dp(6)).coerceIn(0,h-1) else 0
+        val area=Rect(0,top,w,h)
+        backdropImage.clipBounds=if(prime) area else null
         if(::shelfPlayer.isInitialized) shelfPlayer.setPreviewBounds(area)
         val image=backdropImage.drawable ?: return
         val iw=image.intrinsicWidth.toFloat(); val ih=image.intrinsicHeight.toFloat()
         if(iw<=0 || ih<=0) return
-        val factor=minOf(area.width()/iw,area.height()/ih)
+        // Retain the original full-screen cover scale; Prime only shifts below the header.
+        val factor=maxOf(w/iw,h/ih)
         backdropImage.imageMatrix=Matrix().apply {
             setScale(factor,factor)
-            postTranslate(area.left+(area.width()-iw*factor)/2,area.top+(area.height()-ih*factor)/2)
+            postTranslate((w-iw*factor)/2,if(prime) top.toFloat() else (h-ih*factor)/2)
         }
         if(::glassSource.isInitialized) glassSource.invalidate()
     }
