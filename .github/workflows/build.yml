@@ -18,48 +18,19 @@ jobs:
         mkdir -p app/src/main/java/com/tvos/launcher
         mkdir -p app/src/main/res/layout
 
-        # Kotlin dosyalarını doğru paket klasörüne taşı
-        cp -f *.kt app/src/main/java/com/tvos/launcher/ 2>/dev/null || true
+        cp -f *.kt app/src/main/java/com/tvos/launcher/
+        cp -f "AndroidManifest.xml" app/src/main/AndroidManifest.xml
+        cp -f "item_app.xml" app/src/main/res/layout/item_app.xml
+        cp -rf res/* app/src/main/res/
 
-        # Eski paket klasörü kaldıysa temizle
-        rm -rf app/src/main/java/com/minilauncher
-
-        # Manifest ve layout dosyalarını yerleştir
-        [ -f "AndroidManifest.xml" ] && cp -f AndroidManifest.xml app/src/main/AndroidManifest.xml
-        [ -f "item_app.xml" ] && cp -f item_app.xml app/src/main/res/layout/item_app.xml
-        [ -d "res" ] && cp -rf res/* app/src/main/res/
-
-        # Eski build.gradle dosyalarını silip .kts olarak yerleştir
         rm -f build.gradle build.gradle.kts app/build.gradle app/build.gradle.kts
         cp -f "build.gradle (project)" build.gradle.kts
         cp -f "build.gradle (App)" app/build.gradle.kts
 
-        # settings.gradle.kts dosyasını Google deposuyla yeniden oluştur
         rm -f settings.gradle settings.gradle.kts
-        cat << 'EOF' > settings.gradle.kts
-        pluginManagement {
-            repositories {
-                google()
-                mavenCentral()
-                gradlePluginPortal()
-            }
-        }
-        dependencyResolutionManagement {
-            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-            repositories {
-                google()
-                mavenCentral()
-            }
-        }
-        rootProject.name = "Apple-Launcher"
-        include(":app")
-        EOF
+        printf 'pluginManagement {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)\n    repositories {\n        google()\n        mavenCentral()\n    }\n}\nrootProject.name = "Apple-Launcher"\ninclude(":app")\n' > settings.gradle.kts
 
-        # AndroidX desteği için gradle.properties oluştur
-        cat << 'EOF' > gradle.properties
-        android.useAndroidX=true
-        kotlin.code.style=official
-        EOF
+        printf 'android.useAndroidX=true\nkotlin.code.style=official\n' > gradle.properties
 
     - name: JDK 17 Kurulumu
       uses: actions/setup-java@v5
