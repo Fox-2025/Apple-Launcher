@@ -176,12 +176,23 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                         val english=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
                         val source=if(watched) { if(english) "Recently watched · Live TV" else "Yakın zamanda izlenen · Canlı TV" }
                             else { if(english) "Channel suggestion · Live TV" else "Kanal önerisi · Canlı TV" }
+                        if(watched && channelUri!=null && !name.isNullOrBlank()) LiveTuner.remember(context,channelUri)
                         best=Item(display,if(program.isNullOrBlank()) source else source+"\n"+program,
-                            logo,null,true,candidate?.uri,candidate?.online ?: providerLogo)
+                            logo,null,true,candidate?.uri,candidate?.online ?: providerLogo,link=channelUri)
                         bestTime=score
                     }
                 }
             }.onFailure { android.util.Log.w("TvShelf","Live channel metadata unavailable: "+path,it) }
+        }
+        if(best==null) {
+            val u=LiveTuner.channel(context)
+            if(u!=null) runCatching {
+                resolver.query(u,arrayOf("display_name"),null,null,null)?.use { c -> if(c.moveToFirst()) {
+                    val name=c.getString(0).orEmpty(); val candidate=channelCatalog[normalizeChannel(name)]
+                    val en=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("language","tr")=="en"
+                    if(name.isNotBlank()) best=Item(name,if(en) "Available TV channel" else "Erişilebilir TV kanalı",android.media.tv.TvContract.buildChannelLogoUri(u),null,true,candidate?.uri,candidate?.online,link=u)
+                } }
+            }
         }
         return best
     }
@@ -192,18 +203,29 @@ internal class TvShelf(private val context: Context, private val texture: Textur
     private var catalogueCache: List<Item> = emptyList()
     private var catalogueAt = 0L
     private var catalogueLanguage = ""
-    private fun justWatchNetflix(): List<Item> {
+    private var catalogueProvider=""
+    private fun todProvider():String? = runCatching {
+        val conn=URL("https://apis.justwatch.com/content/providers/locale/tr_TR").openConnection().apply { connectTimeout=5000; readTimeout=6000 }
+        val arr=org.json.JSONArray(conn.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() })
+        for(i in 0 until arr.length()) {
+            val obj=arr.getJSONObject(i)
+            if(obj.optString("clear_name").equals("TOD TV",true)) return@runCatching obj.optString("short_name").takeIf { it.matches(Regex("[a-zA-Z0-9_-]{1,24}")) }
+        }
+        null
+    }.getOrNull()
+    private fun justWatchNetflix(tod:Boolean=false): List<Item> {
+        val provider=if(tod) todProvider() ?: run { android.util.Log.i("TvShelf","CATALOG TOD provider unavailable"); return emptyList() } else "nfx"
         val prefs=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE)
         val lang=if(prefs.getString("language","tr")=="en") "en" else "tr"
         val now=android.os.SystemClock.elapsedRealtime()
-        if(catalogueCache.isNotEmpty() && catalogueLanguage==lang && now-catalogueAt<30*60*1000L) return catalogueCache
+        if(catalogueCache.isNotEmpty() && catalogueLanguage==lang && catalogueProvider==provider && now-catalogueAt<30*60*1000L) return catalogueCache
         val queryText="query NetflixTR(\$country: Country!, \$language: Language!, \$first: Int!, \$filter: TitleFilter) { popularTitles(country: \$country, filter: \$filter, first: \$first, sortBy: POPULAR, sortRandomSeed: 0) { edges { node { content(country: \$country, language: \$language) { title shortDescription backdrops { backdropUrl } } offers(country: \$country, platform: WEB) { standardWebURL package { technicalName } } } } } }"
         val groups=mutableListOf<List<Item>>()
         for(kind in listOf("MOVIE","SHOW")) {
             val group=mutableListOf<Item>()
             runCatching {
                 val filter=org.json.JSONObject()
-                    .put("packages",org.json.JSONArray().put("nfx"))
+                    .put("packages",org.json.JSONArray().put(provider))
                     .put("objectTypes",org.json.JSONArray().put(kind))
                     .put("monetizationTypes",org.json.JSONArray().put("FLATRATE"))
                 val vars=org.json.JSONObject().put("country","TR").put("language",lang).put("first",12).put("filter",filter)
@@ -235,11 +257,11 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                         val offers=node.optJSONArray("offers")
                         if(offers!=null) for(j in 0 until offers.length()) {
                             val offer=offers.optJSONObject(j) ?: continue
-                            if(offer.optJSONObject("package")?.optString("technicalName")!="netflix") continue
+                            if(tod || offer.optJSONObject("package")?.optString("technicalName")!="netflix") continue
                             val candidate=Uri.parse(offer.optString("standardWebURL"))
                             if(candidate.scheme=="https" && candidate.host in setOf("www.netflix.com","netflix.com")) { link=candidate; break }
                         }
-                        val credit=if(lang=="tr") "Netflix Türkiye · JustWatch" else "Netflix Turkey · JustWatch"
+                        val credit=if(tod) "TOD TV · JustWatch" else if(lang=="tr") "Netflix Türkiye · JustWatch" else "Netflix Turkey · JustWatch"
                         val desc=content.optString("shortDescription").takeUnless { it=="null" }.orEmpty()
                         group.add(Item(title,if(desc.isBlank()) credit else "$credit • $desc",art,null,link=link))
                     }
@@ -252,7 +274,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         for(i in 0 until 12) for(group in groups) group.getOrNull(i)?.let { mixed.add(it) }
         val result=mixed.distinctBy { it.title }.take(16)
         if(result.isNotEmpty()) {
-            catalogueCache=result; catalogueAt=now; catalogueLanguage=lang
+            catalogueCache=result; catalogueAt=now; catalogueLanguage=lang; catalogueProvider=provider
         }
         return result
     }
@@ -293,16 +315,17 @@ internal class TvShelf(private val context: Context, private val texture: Textur
             if (ticket == generation && active) worker.execute {
                 val native=if(liveTv) listOfNotNull(liveChannel(pkg)) else query(pkg)
                 val netflix=pkg in setOf("com.netflix.ninja","com.netflix.mediaclient")
-                val fallback=netflix && native.isEmpty()
-                val jw=if(fallback) justWatchNetflix() else emptyList()
-                val result=if(fallback) jw.ifEmpty { netflixCatalog() } else native
+                val tod=pkg in setOf("com.beonetv.tod","com.digiturk.tod","com.digiturk.tod.mobil","com.todtv.tod","com.digiturk.iq.mobil")
+                val fallback=(netflix || tod) && native.isEmpty()
+                val jw=if(fallback) justWatchNetflix(tod) else emptyList()
+                val result=if(fallback && netflix) jw.ifEmpty { netflixCatalog() } else if(fallback) jw else native
                 main.post {
                     if (ticket == generation && active) {
                         items = result
                         available = result.isNotEmpty()
                         val images=result.count { it.image!=null }
                         val videos=result.count { it.video!=null }
-                        record(if(liveTv) (if(result.isEmpty()) "Kanal bilgisi yok" else "Kanal: "+result.first().title) else if(fallback) (if(result.isEmpty()) "Netflix: katalog verisi yok" else (if(jw.isNotEmpty()) "JustWatch TR" else "TMDB")+" · IMG: $images") else "IMG: $images  VID: $videos")
+                        record(if(liveTv) (if(result.isEmpty()) "Kanal bilgisi yok" else "Kanal: "+result.first().title) else if(fallback) (if(result.isEmpty()) "Katalog verisi yok" else (if(jw.isNotEmpty()) "JustWatch TR" else "TMDB")+" · IMG: $images") else "IMG: $images  VID: $videos")
                         if (available) show(0) else onItem(null, null)
                     }
                 }
@@ -375,7 +398,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
             if(!path.matches(Regex("channel_logos/[0-9]{4}\\.png"))) return@runCatching null
             return@runCatching context.assets.open(path).use { BitmapFactory.decodeStream(it) }
         }
-        val cacheDir=java.io.File(context.cacheDir,"shelf-images-v2").apply { mkdirs() }
+        val cacheDir=java.io.File(context.cacheDir,"shelf-images-v3").apply { mkdirs() }
         val remote=uri.scheme=="https"
         val cache=if(remote) java.io.File(cacheDir,java.security.MessageDigest.getInstance("SHA-256").digest((limit.toString()+":"+uri.toString()).toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }+".img") else null
         if(cache!=null && cache.isFile && System.currentTimeMillis()-cache.lastModified() in 0..604800000L) {
@@ -405,7 +428,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val longest=maxOf(decoded.width,decoded.height)
         val bitmap=if(longest>limit) Bitmap.createScaledBitmap(decoded,maxOf(1,decoded.width*limit/longest),maxOf(1,decoded.height*limit/longest),true).also { if(it!==decoded) decoded.recycle() } else decoded
         if(bitmap!=null && cache!=null) runCatching {
-            cache.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG,94,it) }
+            cache.outputStream().use { bitmap.compress(if(bitmap.hasAlpha()) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG,96,it) }
             val entries=cacheDir.listFiles().orEmpty().sortedBy { it.lastModified() }
             var total=entries.sumOf { it.length() }
             for(file in entries) { if(total<=128L*1024*1024) break; val size=file.length(); if(file.delete()) total-=size }
@@ -427,6 +450,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                 if (player === it) {
                     vw = it.videoWidth
                     vh = it.videoHeight
+                    android.util.Log.i("TvShelf","VIDEO pkg="+selectedPackage+" size="+vw+"x"+vh)
                     fit()
                     it.setVolume(if (expanded) 1f else 0f, if (expanded) 1f else 0f)
                     it.isLooping = items.size == 1
@@ -453,7 +477,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         val w = texture.width.toFloat()
         val h = texture.height.toFloat()
         if (w <= 0 || h <= 0 || vw <= 0 || vh <= 0) return
-        val factor = maxOf(w / vw, h / vh)
+        val factor = minOf(w / vw, h / vh)
         texture.setTransform(Matrix().apply { setScale(vw * factor / w, vh * factor / h, w / 2, h / 2) })
     }
 
