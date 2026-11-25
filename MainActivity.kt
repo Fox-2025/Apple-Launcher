@@ -353,12 +353,17 @@ class MainActivity : Activity() {
                 result[id]=Tile(id,label,if(state==android.media.tv.TvInputManager.INPUT_STATE_CONNECTED) t("HDMI • Bağlı","HDMI • Connected") else t("HDMI • Beklemede","HDMI • Standby"),0xff25344e.toInt(),"HDMI",intent)
             }
         }
+        val sourceApp=result.values.firstOrNull { defaultRank(it)==6 }
+        if(sourceApp!=null) result.remove(sourceApp.id)
+        result["builtin:source"]=Tile("builtin:source","Source",t("TV girişlerini seç","Choose TV input"),0xff25344e.toInt(),"HDMI",sourceApp?.launch,sourceApp?.icon,sourceApp?.banner)
         return result.values.sortedBy { it.title.lowercase() }
     }
 
     private fun displayName(tile: Tile): String {
         val custom = prefs.getString("name_" + tile.id, null)
         if (!custom.isNullOrBlank()) return custom
+        if(tile.id=="builtin:source") return "Source"
+        if(tile.id=="com.tcl.tv") return t("Canlı TV","Live TV")
         val name = tile.title.trim().lowercase(java.util.Locale.ROOT)
             .replace(Regex("[_\\s-]+"), " ")
         return when {
@@ -529,11 +534,12 @@ class MainActivity : Activity() {
 
     private fun defaultRank(tile: Tile): Int {
         val id=tile.id.lowercase(java.util.Locale.ROOT)
+        if(id=="builtin:source") return 6
         val name=java.text.Normalizer.normalize(tile.title.lowercase(java.util.Locale.ROOT),java.text.Normalizer.Form.NFD)
             .replace(Regex("\\p{M}+"),"").replace('ı','i').trim()
             .replace(Regex("[_\\s-]+")," ")
         return when {
-            name in setOf("canli tv","live tv","tv","live television","television","televizyon","tv channels","tv kanallari","channels") ||
+            id=="com.tcl.tv" || name in setOf("canli tv","live tv","tv","live television","television","televizyon","tv channels","tv kanallari","channels") ||
                 id in setOf("com.android.tv","com.google.android.tv","com.tcl.tv","com.tcl.tvmanager") && name.contains("tv") -> 0
             id in setOf("com.netflix.ninja","com.netflix.mediaclient") || name=="netflix" -> 1
             id=="com.google.android.youtube.tv" || name=="youtube" -> 2
@@ -937,7 +943,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateShelf(tile: Tile?) {
-        val newKey=tile?.id?.takeIf { id -> tiles().take(columns).any { it.id==id } && !id.startsWith("hdmi:") }
+        val newKey=tile?.id?.takeIf { id -> tiles().take(columns).any { it.id==id } && !id.startsWith("hdmi:") && !id.startsWith("builtin:") }
         if(shelfKey==newKey && newKey!=null && shelfPlayer.available) return
         shelfKey=newKey
         if(::shelfPlayer.isInitialized) shelfPlayer.select(if(resumed && movingId==null) newKey else null,tile?.let { defaultRank(it)==0 }==true)
@@ -955,7 +961,41 @@ class MainActivity : Activity() {
         glassSource.invalidate()
     }
 
+    private fun sourceMenu(tile:Tile) {
+        val inputs=runCatching {
+            tvInputs?.tvInputList.orEmpty().filter { it.isPassthroughInput }.sortedBy { it.loadLabel(this).toString() }
+        }.getOrDefault(emptyList())
+        val labels=inputs.map { input ->
+            val name=runCatching { input.loadCustomLabel(this)?.toString()?.takeIf { it.isNotBlank() } ?: input.loadLabel(this).toString() }.getOrDefault(input.id)
+            val state=runCatching { tvInputs?.getInputState(input.id) }.getOrNull()
+            val connection=when(state) {
+                android.media.tv.TvInputManager.INPUT_STATE_CONNECTED -> t("Bağlı","Connected")
+                android.media.tv.TvInputManager.INPUT_STATE_CONNECTED_STANDBY -> t("Beklemede","Standby")
+                android.media.tv.TvInputManager.INPUT_STATE_DISCONNECTED -> t("Bağlı değil","Disconnected")
+                else -> t("Durum bilinmiyor","Unknown")
+            }
+            name+" · "+connection
+        }
+        val actions=labels+listOf(t("TV kaynak seçicisini aç","Open TV source selector"))
+        glassMenu("Source",actions.toTypedArray()) { index ->
+            if(index<inputs.size) {
+                val uri=android.media.tv.TvContract.buildChannelUriForPassthroughInput(inputs[index].id)
+                val intent=Intent(Intent.ACTION_VIEW,uri)
+                val tcl=Intent(intent).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")
+                val launched=runCatching { startActivity(tcl); true }.getOrElse {
+                    runCatching { startActivity(intent); true }.getOrDefault(false)
+                }
+                if(!launched) Toast.makeText(this,t("Bu TV girişi doğrudan açılamıyor.","This TV input cannot be opened directly."),Toast.LENGTH_LONG).show()
+            } else {
+                val original=tile.launch
+                if(original==null || !runCatching { startActivity(original); true }.getOrDefault(false))
+                    Toast.makeText(this,t("TV kaynak seçicisi erişilebilir değil. Kumandadaki Source tuşunu kullan.","TV source selector unavailable. Use the remote Source button."),Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private fun launch(tile: Tile) {
+        if(tile.id=="builtin:source") { sourceMenu(tile); return }
         val intent = tile.launch
         if (intent == null) {
             Toast.makeText(this, t("Bu giriş açılamıyor.","This input cannot be opened."), Toast.LENGTH_SHORT).show()
@@ -992,7 +1032,7 @@ class MainActivity : Activity() {
     }
 
     private fun canUninstall(tile:Tile):Boolean {
-        if(tile.id.startsWith("hdmi:") || tile.id==packageName) return false
+        if(tile.id.startsWith("hdmi:") || tile.id.startsWith("builtin:") || tile.id==packageName) return false
         return runCatching {
             val info=packageManager.getApplicationInfo(tile.id,0)
             (info.flags and (android.content.pm.ApplicationInfo.FLAG_SYSTEM or android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP))==0
@@ -1063,7 +1103,7 @@ class MainActivity : Activity() {
             "HOME role: "+if(roleHeld) t("verildi","granted") else t("verilmedi","not granted"),
             t("Varsayılan başlatıcı seç","Choose default launcher"),
             t("Yardımcı: ","Helper: ")+if(helper) t("etkin","enabled") else t("kapalı","disabled"),
-            t("Erişilebilirlik ayarlarını aç","Open accessibility settings"),
+            t("Erişilebilirlik / ADB kurulum rehberi","Accessibility / ADB setup guide"),
             "Android "+android.os.Build.VERSION.RELEASE+" • SDK "+android.os.Build.VERSION.SDK_INT),
             onBack={showSettings()}) { choice ->
             when(choice) {
@@ -1080,13 +1120,29 @@ class MainActivity : Activity() {
                     }
                 }
                 4 -> {
-                    homeSettings()
-                    openSystemSettings(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    accessibilitySettingsGuide()
                 }
                 else -> homeSettings()
             }
         }
     }
+    private fun accessibilitySettingsGuide() {
+        glassMenu(t("Erişilebilirlik","Accessibility"),arrayOf(
+            t("Sistem ayarını aç","Open system settings"),
+            t("ADB ile etkinleştirme komutları","ADB setup commands"),
+            t("Servis durumu (ADB)","Service status (ADB)")),onBack={homeSettings()}) { choice ->
+            when(choice) {
+                0 -> if(!openSystemSettings(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) accessibilitySettingsGuide()
+                1 -> android.app.AlertDialog.Builder(this).setTitle(t("ADB kurulum","ADB setup")).setMessage(
+                    "adb shell am start -n com.tvos.launcher/.MainActivity\n\nadb shell appops set com.tvos.launcher APP_AUTO_START allow\n\nadb shell settings put secure enabled_accessibility_services com.tvos.launcher/com.tvos.launcher.HomeRedirectService\n\nadb shell settings put secure accessibility_enabled 1\n\n"+
+                    t("Başka erişilebilirlik servisleri varsa mevcut listeyi koruyarak ekleyin.","Preserve any other enabled accessibility services."))
+                    .setPositiveButton("OK") { _,_ -> accessibilitySettingsGuide() }.show()
+                else -> android.app.AlertDialog.Builder(this).setTitle("ADB").setMessage("adb shell dumpsys accessibility\n\nadb shell cmd appops get com.tvos.launcher")
+                    .setPositiveButton("OK") { _,_ -> accessibilitySettingsGuide() }.show()
+            }
+        }
+    }
+
     private fun openSystemSettings(action:String):Boolean {
         val intent=Intent(action)
         val candidates=packageManager.queryIntentActivities(intent,android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
@@ -1111,6 +1167,7 @@ class MainActivity : Activity() {
     private fun openTvSettings() {
         glassMenu(t("TV ayarları","TV settings"),arrayOf(t("Cihaz ayarlarını aç","Open device settings"),
             t("Ağ ve internet","Network and internet"),t("Erişilebilirlik","Accessibility"),t("Cihaz bilgileri","Device information")),onBack={showSettings()}) { choice ->
+            if(choice==2) { accessibilitySettingsGuide(); return@glassMenu }
             openTvSettings()
             openSystemSettings(when(choice) {
                 1 -> android.provider.Settings.ACTION_WIFI_SETTINGS
