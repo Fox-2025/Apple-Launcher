@@ -13,23 +13,35 @@ jobs:
     - name: Kodu indir
       uses: actions/checkout@v5
 
-    - name: Klasör Yapısını ve Ayarları Otomatik Düzenle
+    - name: Klasör Yapısını Python ile Otomatik Düzenle
       run: |
-        mkdir -p app/src/main/java/com/tvos/launcher
-        mkdir -p app/src/main/res/layout
+        python3 -c '
+        import os, shutil
 
-        cp -f *.kt* app/src/main/java/com/tvos/launcher/
-        cp -f *AndroidManifest* app/src/main/AndroidManifest.xml
-        cp -f *item_app* app/src/main/res/layout/item_app.xml
-        cp -rf res/* app/src/main/res/
+        os.makedirs("app/src/main/java/com/tvos/launcher", exist_ok=True)
+        os.makedirs("app/src/main/res/layout", exist_ok=True)
 
-        rm -f build.gradle build.gradle.kts app/build.gradle app/build.gradle.kts
-        cp -f *project* build.gradle.kts
-        cp -f *App* app/build.gradle.kts
+        for f in os.listdir("."):
+            if not os.path.isfile(f):
+                continue
+            clean = f.strip()
+            if clean.endswith(".kt"):
+                shutil.copy2(f, f"app/src/main/java/com/tvos/launcher/{clean}")
+            elif "AndroidManifest" in clean:
+                shutil.copy2(f, "app/src/main/AndroidManifest.xml")
+            elif "item_app" in clean:
+                shutil.copy2(f, "app/src/main/res/layout/item_app.xml")
+            elif "project" in clean and "gradle" in clean:
+                shutil.copy2(f, "build.gradle.kts")
+            elif "App" in clean and "gradle" in clean:
+                shutil.copy2(f, "app/build.gradle.kts")
 
-        rm -f settings.gradle settings.gradle.kts
+        if os.path.isdir("res"):
+            shutil.copytree("res", "app/src/main/res", dirs_exist_ok=True)
+        '
+
+        rm -f build.gradle app/build.gradle settings.gradle settings.gradle.kts
         printf 'pluginManagement {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)\n    repositories {\n        google()\n        mavenCentral()\n    }\n}\nrootProject.name = "Apple-Launcher"\ninclude(":app")\n' > settings.gradle.kts
-
         printf 'android.useAndroidX=true\nkotlin.code.style=official\n' > gradle.properties
 
     - name: JDK 17 Kurulumu
