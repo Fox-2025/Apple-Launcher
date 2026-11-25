@@ -39,6 +39,78 @@ class MainActivity : Activity() {
     private var expandedShelf = false
     private var shelfKey: String? = null
     private var resumed = false
+    private lateinit var weatherText: TextView
+    private val weatherHandler=android.os.Handler(android.os.Looper.getMainLooper())
+    private val weatherWorker=Executors.newSingleThreadExecutor()
+    private var weatherTicket=0
+    private var weatherBusy=false
+    private val weatherRefresh=Runnable { refreshWeather() }
+    private fun weatherCity()=prefs.getString("weather_city","İstanbul").orEmpty()
+    private fun refreshWeather() {
+        weatherHandler.removeCallbacks(weatherRefresh)
+        if(!resumed || !::weatherText.isInitialized) return
+        weatherHandler.postDelayed(weatherRefresh,30*60*1000L)
+        if(weatherBusy) return
+        val city=weatherCity()
+        val ticket=++weatherTicket
+        weatherBusy=true
+        val old=prefs.getString("weather_display",null)
+        val age=System.currentTimeMillis()-prefs.getLong("weather_time",0)
+        weatherText.text=if(old!=null && prefs.getString("weather_cached_city","")==city && age in 0..3600000L) old else city+"  ·  —°"
+        if(old!=null && prefs.getString("weather_cached_city","")==city && age in 0..900000L) { weatherBusy=false; return }
+        weatherWorker.execute {
+            val data=runCatching {
+                val query=java.net.URLEncoder.encode(city,"UTF-8")
+                fun json(url:String):JSONObject {
+                    val c=URL(url).openConnection().apply { connectTimeout=6000; readTimeout=6000 }
+                    return JSONObject(c.getInputStream().bufferedReader(Charsets.UTF_8).use { it.readText() })
+                }
+                val geo=json("https://geocoding-api.open-meteo.com/v1/search?name="+query+"&count=10&language=tr&format=json").getJSONArray("results")
+                val location=(0 until geo.length()).map { geo.getJSONObject(it) }.firstOrNull { it.optString("country_code")=="TR" } ?: geo.getJSONObject(0)
+                val lat=location.getDouble("latitude"); val lon=location.getDouble("longitude")
+                val current=json("https://api.open-meteo.com/v1/forecast?latitude="+lat+"&longitude="+lon+"&current=temperature_2m,weather_code,is_day&timezone=auto").getJSONObject("current")
+                val code=current.getInt("weather_code")
+                val day=current.optInt("is_day",1)==1
+                val icon=when(code) {
+                    0 -> if(day) "☀" else "☾"
+                    1,2 -> if(day) "⛅" else "☁"
+                    3,45,48 -> "☁"
+                    in 51..67,in 80..82 -> "☂"
+                    in 71..77,85,86 -> "❄"
+                    in 95..99 -> "ϟ"
+                    else -> "☁"
+                }
+                icon+"  "+current.getDouble("temperature_2m").roundToInt()+"°  "+location.optString("name",city)
+            }.getOrNull()
+            weatherHandler.post {
+                weatherBusy=false
+                if(ticket!=weatherTicket || city!=weatherCity()) { if(resumed) refreshWeather(); return@post }
+                if(data!=null) {
+                    prefs.edit().putString("weather_display",data).putString("weather_cached_city",city).putLong("weather_time",System.currentTimeMillis()).apply()
+                    if(::weatherText.isInitialized) weatherText.text=data
+                }
+            }
+        }
+    }
+    private fun weatherSettings() {
+        val (dialog,_,items)=newGlassDialog(t("Hava durumu • Bölge","Weather • Location"))
+        dialog.setOnCancelListener { dialog.dismiss(); generalSettings() }
+        val field=EditText(this).apply {
+            setText(weatherCity()); setSingleLine(true); setTextColor(Color.WHITE); typeface=uiFont(false)
+            hint=t("Şehir veya ilçe","City or district"); setPadding(dp(12),dp(8),dp(12),dp(8))
+        }
+        items.addView(field)
+        items.addView(menuRow(t("Kaydet","Save")) {
+            val city=field.text.toString().trim().take(70)
+            if(city.isNotBlank()) {
+                prefs.edit().putString("weather_city",city).remove("weather_time").apply()
+                weatherTicket++; weatherText.text=city+"  ·  —°"; refreshWeather()
+            }
+            dialog.dismiss(); generalSettings()
+        })
+        items.addView(text("Weather data: Open-Meteo.com · CC BY 4.0",12f,Color.LTGRAY))
+        presentGlass(dialog); field.requestFocus()
+    }
     private val tvInputs by lazy { getSystemService(android.media.tv.TvInputManager::class.java) }
     private var inputCallbackRegistered=false
     private val inputCallback=object:android.media.tv.TvInputManager.TvInputCallback() {
@@ -132,6 +204,7 @@ class MainActivity : Activity() {
         super.onResume()
         resumed = true
         immersive()
+        refreshWeather()
         if(!inputCallbackRegistered) runCatching {
             tvInputs?.let { it.registerCallback(inputCallback,android.os.Handler(android.os.Looper.getMainLooper())); inputCallbackRegistered=true }
         }
@@ -148,6 +221,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         resumed=false
+        weatherHandler.removeCallbacks(weatherRefresh)
         if(inputCallbackRegistered) {
             runCatching { tvInputs?.unregisterCallback(inputCallback) }
             inputCallbackRegistered=false
@@ -160,6 +234,9 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         if(::shelfPlayer.isInitialized) shelfPlayer.destroy()
         worker.shutdownNow()
+        weatherHandler.removeCallbacksAndMessages(null)
+        weatherTicket++
+        weatherWorker.shutdownNow()
         super.onDestroy()
     }
 
@@ -542,7 +619,14 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        header.addView(View(this), LinearLayout.LayoutParams(1, 1))
+        weatherText=text(weatherCity()+"  ·  —°",19f,Color.WHITE,true).apply {
+            gravity=Gravity.CENTER_VERTICAL
+            contentDescription=t("Hava durumu ve bölge • Open-Meteo","Weather and location • Open-Meteo")
+            setPadding(dp(4),0,dp(12),0)
+            maxLines=1
+        }
+        header.addView(weatherText,LinearLayout.LayoutParams(-2,-1))
+        if(resumed) refreshWeather()
         header.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         modeLabel = text("", 10f, Color.WHITE, true)
         header.addView(modeLabel)
@@ -815,7 +899,7 @@ class MainActivity : Activity() {
         }
     }
     private fun generalSettings() {
-        glassMenu(t("Genel","General"),arrayOf(t("Dil  ·  Türkçe","Language  ·  English")), onBack={showSettings()}) { languageMenu() }
+        glassMenu(t("Genel","General"),arrayOf(t("Dil","Language"),t("Hava durumu • ","Weather • ")+weatherCity()), onBack={showSettings()}) { if(it==0) languageMenu() else weatherSettings() }
     }
     private fun appearanceSettings() {
         glassMenu(t("Görünüm","Appearance"),arrayOf(if(light) t("Koyu","Dark") else t("Açık","Light")),onBack={showSettings()}) {
