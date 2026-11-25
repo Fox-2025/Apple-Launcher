@@ -517,7 +517,15 @@ class MainActivity : Activity() {
         }
         clock.typeface=uiFont(false)
         header.addView(clock)
-        settings = text("⚙", 24f, Color.WHITE, true).apply {
+        settings = object : TextView(this) {
+            private val gear = SettingsGear(Color.WHITE)
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                val side=minOf(width,height)*0.64f
+                gear.setBounds(((width-side)/2).toInt(),((height-side)/2).toInt(),((width+side)/2).toInt(),((height+side)/2).toInt())
+                gear.draw(canvas)
+            }
+        }.apply {
             contentDescription = t("Başlatıcı ayarları", "Launcher settings")
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(7), dp(12), dp(7))
@@ -645,7 +653,13 @@ class MainActivity : Activity() {
             elevation = dp(3).toFloat()
         }
         val downloaded = artwork(tile)
-        if (downloaded != null || tile.banner != null || tile.icon != null) {
+        val systemSettings = tile.id in setOf("com.android.tv.settings","com.android.settings","com.google.android.tv.settings") ||
+            tile.title.lowercase() in setOf("settings","ayarlar","tv settings","tv ayarları")
+        if(systemSettings && !asset(tile,"custom").isFile) {
+            panel.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0xff9da3ae.toInt(),0xff555c67.toInt())).apply { cornerRadius=dp(13).toFloat() }
+            val image=ImageView(this).apply { setImageDrawable(SettingsGear(Color.WHITE)); scaleType=ImageView.ScaleType.FIT_CENTER; setPadding(dp(10),dp(8),dp(10),dp(8)) }
+            panel.addView(image,FrameLayout.LayoutParams(-1,-1))
+        } else if (downloaded != null || tile.banner != null || tile.icon != null) {
             val image = ImageView(this).apply {
                 setImageDrawable(downloaded ?: tile.banner ?: tile.icon)
                 scaleType = if (downloaded != null || tile.banner != null) ImageView.ScaleType.CENTER_CROP else ImageView.ScaleType.FIT_CENTER
@@ -697,7 +711,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateShelf(tile: Tile?) {
-        val newKey=tile?.id?.takeIf { id -> tiles().take(columns).any { it.id==id } }
+        val newKey=tile?.id?.takeIf { id -> tiles().take(columns).any { it.id==id } && !id.startsWith("hdmi:") }
         if(shelfKey==newKey && newKey!=null && shelfPlayer.available) return
         shelfKey=newKey
         if(::shelfPlayer.isInitialized) shelfPlayer.select(if(resumed && movingId==null) newKey else null)
@@ -709,18 +723,15 @@ class MainActivity : Activity() {
             if (customBg != null) intArrayOf(0x22000000, 0x55000000, 0xee080b12.toInt())
             else intArrayOf(blend(color, if(light) Color.WHITE else Color.BLACK, if(light) .2f else .28f), 0xff171c27.toInt(), 0xff080b12.toInt()))
         heroTitle.text = tile?.let { displayName(it) } ?: t("Ana Ekran", "Home")
-        heroSub.text = if(tile == null) t("Uygulama seç", "Choose an app")
-            else if(tile.launch == null) tile.subtitle + "  •  Demo" else tile.subtitle
-        heroArt.tile = tile
-        heroArt.visibility = if (customBg != null) View.INVISIBLE else View.VISIBLE
-        heroArt.invalidate()
+        heroSub.text = if(tile == null) t("Uygulama seç", "Choose an app") else tile.subtitle
+        heroArt.visibility = View.INVISIBLE
         glassSource.invalidate()
     }
 
     private fun launch(tile: Tile) {
         val intent = tile.launch
         if (intent == null) {
-            Toast.makeText(this, displayName(tile) + t(" — demo kartı, gerçek uygulama değil.", " — demo tile, not an installed application."), Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, t("Bu giriş açılamıyor.","This input cannot be opened."), Toast.LENGTH_SHORT).show()
             return
         }
         runCatching { startActivity(intent) }.onFailure {
@@ -752,39 +763,106 @@ class MainActivity : Activity() {
     }
 
     private fun showSettings() {
-        val actions = arrayOf(t("Genel  ›","General  ›"),t("Görünüm  ›","Appearance  ›"),
-            t("Uygulamalar  ›","Applications  ›"),t("Varsayılan ana ekran","Default home screen"),t("TV ayarları","TV settings"))
-        glassMenu(t("Ayarlar","Settings"),actions) { which ->
+        glassMenu(t("Ayarlar","Settings"),arrayOf(t("Genel  ›","General  ›"),t("Görünüm  ›","Appearance  ›"),
+            t("Uygulamalar  ›","Applications  ›"),t("Ana ekran  ›","Home screen  ›"),
+            t("Top Shelf durumu  ›","Top Shelf status  ›"),t("TV ayarları  ›","TV settings  ›"))) { which ->
             when(which) {
-                0 -> glassMenu(t("Genel","General"),arrayOf(t("Dil  ·  Türkçe","Language  ·  English"))) { languageMenu() }
-                1 -> glassMenu(t("Görünüm","Appearance"),arrayOf(if(light) t("Koyu","Dark") else t("Açık","Light"))) { light=!light; save(); buildHome() }
-                2 -> glassMenu(t("Uygulamalar","Applications"),arrayOf(
-                    if(showHidden) t("Gizli uygulamaları gizle","Hide hidden apps") else t("Gizli uygulamaları göster","Show hidden apps"),
-                    if(storeIcons) t("Apple TV ikonlarını kapat","Disable Apple TV icons") else t("Apple TV ikonlarını aç","Enable Apple TV icons"),
-                    t("Uygulamaları yenile","Refresh apps"))) { choice ->
-                    when(choice) {
-                        0 -> { showHidden=!showHidden; refreshCards() }
-                        1 -> { storeIcons=!storeIcons; save(); refreshCards(); fetchStoreIcons() }
-                        2 -> { apps=installed(); refreshCards(); fetchStoreIcons() }
-                    }
-                }
+                0 -> generalSettings()
+                1 -> appearanceSettings()
+                2 -> applicationSettings()
                 3 -> homeSettings()
-                4 -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_SETTINGS)) }
-                    .onFailure { Toast.makeText(this,t("Ayarlar açılamadı","Could not open settings"),Toast.LENGTH_SHORT).show() }
+                4 -> shelfDiagnostics()
+                5 -> openTvSettings()
             }
         }
     }
-
+    private fun generalSettings() {
+        glassMenu(t("Genel","General"),arrayOf(t("Dil  ·  Türkçe","Language  ·  English")), onBack={showSettings()}) { languageMenu() }
+    }
+    private fun appearanceSettings() {
+        glassMenu(t("Görünüm","Appearance"),arrayOf(if(light) t("Koyu","Dark") else t("Açık","Light")),onBack={showSettings()}) {
+            light=!light; save(); buildHome(); appearanceSettings()
+        }
+    }
+    private fun applicationSettings() {
+        glassMenu(t("Uygulamalar","Applications"),arrayOf(
+            if(showHidden) t("Gizli uygulamaları gizle","Hide hidden apps") else t("Gizli uygulamaları göster","Show hidden apps"),
+            if(storeIcons) t("Apple TV ikonlarını kapat","Disable Apple TV icons") else t("Apple TV ikonlarını aç","Enable Apple TV icons"),
+            t("Uygulamaları yenile","Refresh apps")),onBack={showSettings()}) { choice ->
+            when(choice) {
+                0 -> { showHidden=!showHidden; refreshCards() }
+                1 -> { storeIcons=!storeIcons; save(); refreshCards(); fetchStoreIcons() }
+                2 -> { apps=installed(); refreshCards(); fetchStoreIcons() }
+            }
+            applicationSettings()
+        }
+    }
     private fun homeSettings() {
         val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
         val current = packageManager.resolveActivity(home,android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
         val isDefault = current?.activityInfo?.packageName == packageName
-        val status = if(isDefault) t("Bu başlatıcı varsayılan","This launcher is default") else t("Henüz varsayılan değil","Not yet default")
-        glassMenu(status,arrayOf(t("Sistem ana ekran seçimi","System home selection"),t("ADB kurulum bilgisi","ADB setup information"))) { choice ->
-            if(choice==0) runCatching { startActivity(Intent(android.provider.Settings.ACTION_HOME_SETTINGS)) }
-                .onFailure { Toast.makeText(this,t("TV yazılımı seçimi engelliyor. ADB bilgisine bak.","Firmware blocks selection. See ADB information."),Toast.LENGTH_LONG).show() }
-            else glassMenu(t("Bilgisayardan ADB","ADB from computer"),arrayOf("adb shell cmd package set-home-activity com.tvos.launcher/.MainActivity")) { }
+        val status = if(isDefault) t("Varsayılan ana ekran: TVOS Launcher","Default home: TVOS Launcher") else t("Varsayılan ana ekran: sistem","Default home: system")
+        glassMenu(t("Ana ekran","Home screen"),arrayOf(status,t("Varsayılan başlatıcı seç","Choose default launcher"),t("Ana ekran yardımcısı • Erişilebilirlik","Home helper • Accessibility")),onBack={showSettings()}) { choice ->
+            when(choice) {
+                0 -> homeSettings()
+                1 -> {
+                    homeSettings()
+                    val launched=runCatching {
+                        if(android.os.Build.VERSION.SDK_INT>=29) {
+                            val roles=getSystemService(android.app.role.RoleManager::class.java)
+                            if(roles!=null && roles.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME) && !roles.isRoleHeld(android.app.role.RoleManager.ROLE_HOME)) {
+                                startActivityForResult(roles.createRequestRoleIntent(android.app.role.RoleManager.ROLE_HOME),231)
+                                true
+                            } else if(isDefault) true else false
+                        } else false
+                    }.getOrDefault(false)
+                    if(!launched) openSystemSettings(android.provider.Settings.ACTION_HOME_SETTINGS)
+                }
+                2 -> {
+                    homeSettings()
+                    openSystemSettings(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                }
+            }
         }
+    }
+    private fun openSystemSettings(action:String):Boolean {
+        val intent=Intent(action)
+        val candidates=packageManager.queryIntentActivities(intent,android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+        val chosen=candidates.firstOrNull {
+            val a=it.activityInfo
+            a.packageName in setOf("com.android.tv.settings","com.android.settings","com.google.android.tv.settings","com.tcl.settings") ||
+                a.packageName.contains("settings",true)
+        }
+        if(chosen!=null) intent.setClassName(chosen.activityInfo.packageName,chosen.activityInfo.name)
+        else {
+            val resolved=intent.resolveActivity(packageManager)
+            if(resolved==null || resolved.packageName in setOf("com.google.android.apps.tv.launcherx","com.google.android.tvlauncher")) {
+                Toast.makeText(this,t("Bu sistem ayarı TV yazılımında doğrudan açılamıyor.","This system setting is not directly available on this TV."),Toast.LENGTH_LONG).show()
+                return false
+            }
+        }
+        return runCatching { startActivity(intent); true }.getOrElse {
+            Toast.makeText(this,t("Sistem ayarı açılamadı.","Could not open system settings."),Toast.LENGTH_LONG).show()
+            false
+        }
+    }
+    private fun openTvSettings() {
+        glassMenu(t("TV ayarları","TV settings"),arrayOf(t("Cihaz ayarlarını aç","Open device settings"),
+            t("Ağ ve internet","Network and internet"),t("Erişilebilirlik","Accessibility"),t("Cihaz bilgileri","Device information")),onBack={showSettings()}) { choice ->
+            openTvSettings()
+            openSystemSettings(when(choice) {
+                1 -> android.provider.Settings.ACTION_WIFI_SETTINGS
+                2 -> android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS
+                3 -> android.provider.Settings.ACTION_DEVICE_INFO_SETTINGS
+                else -> android.provider.Settings.ACTION_SETTINGS
+            })
+        }
+    }
+    private fun shelfDiagnostics() {
+        val entries=tiles().take(columns).map { tile ->
+            displayName(tile)+"  ·  "+shelfPlayer.status(tile.id)
+        }.ifEmpty { listOf(t("Uygulama yok","No apps")) }
+        glassMenu(t("Top Shelf • içerik durumu","Top Shelf • content status"),entries.toTypedArray(),onBack={showSettings()}) { shelfDiagnostics() }
     }
 
     private fun glass(focused: Boolean, radius: Int = 22): GradientDrawable =
@@ -861,8 +939,9 @@ class MainActivity : Activity() {
             setOnClickListener { onClick() }
         }
 
-    private fun glassMenu(title: String, actions: Array<String>, action: (Int) -> Unit) {
+    private fun glassMenu(title: String, actions: Array<String>, onBack: (() -> Unit)? = null, action: (Int) -> Unit) {
         val (dialog, _, items) = newGlassDialog(title)
+        if(onBack!=null) dialog.setOnCancelListener { dialog.dismiss(); onBack() }
         var first: View? = null
         actions.forEachIndexed { index, label ->
             val row = menuRow(label) { dialog.dismiss(); action(index) }
@@ -877,11 +956,12 @@ class MainActivity : Activity() {
         glassMenu(t("Dil", "Language"), arrayOf(
             (if (!english) "✓  " else "") + "Türkçe",
             (if (english) "✓  " else "") + "English"
-        )) { choice ->
+        ),onBack={generalSettings()}) { choice ->
             english = choice == 1
             save()
             apps = installed()
             buildHome()
+            generalSettings()
         }
     }
 
@@ -909,53 +989,37 @@ class MainActivity : Activity() {
         field.requestFocus()
     }
 
-    private inner class ShelfArt : View(this@MainActivity) {
-        var tile: Tile? = null
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            val w = width.toFloat()
-            val h = height.toFloat()
-            if(w <= 0 || h <= 0) return
-            val color = tile?.color ?: 0xff245487.toInt()
-            paint.shader = RadialGradient(w*0.65f,h*0.48f,h*1.1f,
-                intArrayOf(blend(color, Color.WHITE, .42f),color, Color.TRANSPARENT),
-                floatArrayOf(0f,.42f,1f), Shader.TileMode.CLAMP)
-            canvas.drawRect(0f,0f,w,h,paint)
-            paint.shader = null
-            for(i in 0..4) {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = h*.065f
-                paint.color = Color.argb(25+i*7,255,255,255)
-                val offset = i*h*.14f
-                canvas.drawCircle(w*.76f,h*.56f,h*.36f+offset,paint)
+    private inner class ShelfArt : View(this@MainActivity)
+
+    private class SettingsGear(private val tintColor:Int):Drawable() {
+        private val p=Paint(Paint.ANTI_ALIAS_FLAG)
+        override fun draw(canvas:Canvas) {
+            val w=bounds.width().toFloat(); val h=bounds.height().toFloat()
+            if(w<=0 || h<=0) return
+            val size=minOf(w,h)
+            canvas.save()
+            canvas.translate(bounds.exactCenterX(),bounds.exactCenterY())
+            p.color=tintColor
+            val gear=Path().apply { fillType=Path.FillType.EVEN_ODD }
+            val teeth=14
+            for(i in 0 until teeth*4) {
+                val ang=2.0*Math.PI*i/(teeth*4)-Math.PI/2
+                val r=size*(if(i%4==1 || i%4==2) .48f else .40f)
+                val x=(kotlin.math.cos(ang)*r).toFloat()
+                val y=(kotlin.math.sin(ang)*r).toFloat()
+                if(i==0) gear.moveTo(x,y) else gear.lineTo(x,y)
             }
-            paint.style = Paint.Style.FILL
-            val side = h*.61f
-            val cx = w*.62f
-            val cy = h*.49f
-            val rect = RectF(cx-side/2,cy-side/2,cx+side/2,cy+side/2)
-            paint.color = blend(color,Color.BLACK,.27f)
-            canvas.drawRoundRect(rect,h*.12f,h*.12f,paint)
-            val image = tile?.let { artwork(it) } ?: tile?.banner ?: tile?.icon
-            if(image != null) {
-                val pad = side*.12f
-                val available = side-2*pad
-                val iw = image.intrinsicWidth.coerceAtLeast(1).toFloat()
-                val ih = image.intrinsicHeight.coerceAtLeast(1).toFloat()
-                val scale = minOf(available/iw,available/ih)
-                val dw = iw*scale; val dh = ih*scale
-                val original = Rect(image.bounds)
-                image.setBounds((cx-dw/2).toInt(),(cy-dh/2).toInt(),(cx+dw/2).toInt(),(cy+dh/2).toInt())
-                image.draw(canvas)
-                image.bounds = original
-            } else {
-                paint.color = Color.WHITE
-                paint.textSize = side*.18f
-                paint.typeface = Typeface.create("sans-serif-medium",Typeface.NORMAL)
-                paint.textAlign = Paint.Align.CENTER
-                canvas.drawText(tile?.symbol ?: "▶",cx,cy-(paint.ascent()+paint.descent())/2,paint)
-            }
+            gear.close()
+            gear.addCircle(0f,0f,size*.23f,Path.Direction.CW)
+            canvas.drawPath(gear,p)
+            canvas.drawCircle(0f,0f,size*.13f,p)
+            canvas.restore()
         }
+        override fun setAlpha(alpha:Int) { p.alpha=alpha }
+        override fun setColorFilter(filter:ColorFilter?) { p.colorFilter=filter }
+        @Suppress("DEPRECATION")
+        override fun getOpacity()=PixelFormat.TRANSLUCENT
+        override fun getIntrinsicWidth()=96
+        override fun getIntrinsicHeight()=96
     }
 }
