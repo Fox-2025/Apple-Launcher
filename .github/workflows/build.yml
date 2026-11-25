@@ -13,17 +13,52 @@ jobs:
     - name: Kodu indir
       uses: actions/checkout@v5
 
+    - name: Klasör Yapısını ve Ayarları Otomatik Düzenle
+      run: |
+        mkdir -p app/src/main/java/com/tvos/launcher
+        mkdir -p app/src/main/res/layout
+
+        # Kotlin dosyalarını doğru paket klasörüne taşı
+        cp -f *.kt app/src/main/java/com/tvos/launcher/ 2>/dev/null || true
+
+        # Eski paket klasörü kaldıysa temizle
+        rm -rf app/src/main/java/com/minilauncher
+
+        # Manifest ve layout dosyalarını yerleştir
+        [ -f "AndroidManifest.xml" ] && cp -f AndroidManifest.xml app/src/main/AndroidManifest.xml
+        [ -f "item_app.xml" ] && cp -f item_app.xml app/src/main/res/layout/item_app.xml
+        [ -d "res" ] && cp -rf res/* app/src/main/res/
+
+        # Gradle .kts dosyalarını yerleştir
+        if [ -f "build.gradle (project)" ]; then
+          rm -f build.gradle build.gradle.kts
+          cp -f "build.gradle (project)" build.gradle.kts
+        fi
+
+        if [ -f "build.gradle (App)" ]; then
+          rm -f app/build.gradle app/build.gradle.kts
+          cp -f "build.gradle (App)" app/build.gradle.kts
+        fi
+
+        # AndroidX desteği için gradle.properties kontrolü
+        if [ ! -f "gradle.properties" ]; then
+          echo "android.useAndroidX=true" > gradle.properties
+          echo "kotlin.code.style=official" >> gradle.properties
+        fi
+
     - name: JDK 17 Kurulumu
       uses: actions/setup-java@v5
       with:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: Gradle izinlerini ver
-      run: chmod +x gradlew
+    - name: Gradle Kur
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: '8.5'
 
     - name: Debug APK Oluştur
-      run: ./gradlew assembleDebug
+      run: gradle assembleDebug
 
     - name: APK Dosyasını Yükle
       uses: actions/upload-artifact@v5
