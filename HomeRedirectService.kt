@@ -28,7 +28,7 @@ class HomeRedirectService : AccessibilityService() {
             if(!prefs.getBoolean("live_on_power",true) || powerManager?.isInteractive!=true || !connected) {
                 wakePending=false; return
             }
-            val accepted=LiveTuner.open(this@HomeRedirectService,fast=coldBoot && wakeAttempt==0)
+            val accepted=LiveTuner.open(this@HomeRedirectService,fast=coldBoot && wakeAttempt==0,onPower=true)
             wakeAttempt++
             android.util.Log.i("HomeRedirectService","POWER tuner accepted="+accepted+" attempt="+wakeAttempt+" elapsed="+(SystemClock.elapsedRealtime()-wakeStarted))
             if(!accepted && wakeAttempt<2) { powerHandler.postDelayed(this,650); return }
@@ -102,6 +102,7 @@ class HomeRedirectService : AccessibilityService() {
             if(android.os.Build.VERSION.SDK_INT>=33) registerReceiver(screenReceiver,filter,android.content.Context.RECEIVER_NOT_EXPORTED) else registerReceiver(screenReceiver,filter)
             receiverRegistered=true
         }
+        android.util.Log.i("HomeRedirectService","SERVICE connected uptime="+SystemClock.elapsedRealtime()+" lockedBoot="+BootSession.lockedBootObserved(this))
         val early=tryEarlyBoot()
         consumeBoot()
         if(!early && powerManager?.isInteractive==true && prefs.getBoolean("screen_off_pending",false)) { prefs.edit().remove("screen_off_pending").apply(); scheduleLive() }
@@ -143,6 +144,10 @@ class HomeRedirectService : AccessibilityService() {
 /** Records a real boot only; ordinary Home navigation and package updates do not trigger it. */
 class LiveBootReceiver:android.content.BroadcastReceiver() {
     override fun onReceive(context:android.content.Context,intent:Intent) {
+        if(intent.action==Intent.ACTION_LOCKED_BOOT_COMPLETED) {
+            BootSession.recordLockedBoot(context)
+            return
+        }
         if(intent.action!=Intent.ACTION_BOOT_COMPLETED) return
         BootSession.observe(context)
         if(BootSession.wasHandled(context)) return
@@ -156,6 +161,12 @@ class LiveBootReceiver:android.content.BroadcastReceiver() {
 internal object BootSession {
     private fun prefs(c:android.content.Context)=c.getSharedPreferences("launcher_prefs",android.content.Context.MODE_PRIVATE)
     private fun count(c:android.content.Context)=runCatching { android.provider.Settings.Global.getInt(c.contentResolver,"boot_count",-1) }.getOrDefault(-1)
+    fun recordLockedBoot(c:android.content.Context) {
+        val n=count(c); if(n>=0) c.createDeviceProtectedStorageContext().getSharedPreferences("boot_marker",android.content.Context.MODE_PRIVATE).edit().putInt("locked_count",n).apply()
+    }
+    fun lockedBootObserved(c:android.content.Context):Boolean {
+        val n=count(c); return n>=0 && c.createDeviceProtectedStorageContext().getSharedPreferences("boot_marker",android.content.Context.MODE_PRIVATE).getInt("locked_count",-1)==n
+    }
     @Synchronized fun observe(c:android.content.Context) {
         val n=count(c); if(n<0) return
         val p=prefs(c); val old=p.getInt("observed_boot_count",-1)
@@ -190,7 +201,6 @@ internal object LiveTuner {
         val resolver=c.contentResolver
         val saved=prefs(c).getString("last_tuner_uri",null)?.let { android.net.Uri.parse(it) }?.takeIf { android.media.tv.TvContract.isChannelUriForTunerInput(it) }
         fun valid(u:android.net.Uri):Boolean=runCatching { resolver.query(u,arrayOf("input_id","type"),null,null,null)?.use { it.moveToFirst() && it.getString(1)!="TYPE_PREVIEW" && (tuners.isEmpty() || it.getString(0) in tuners) }==true }.getOrDefault(false)
-        if(saved!=null && valid(saved)) return saved
         // Only provider records with explicit tuner URI; ignore passthrough and arbitrary app intents.
         var recent:android.net.Uri?=null; var stamp=0L
         runCatching {
@@ -204,7 +214,8 @@ internal object LiveTuner {
                 }
             }
         }
-        if(recent!=null) return recent
+        if(recent!=null) { remember(c,recent!!); return recent }
+        if(saved!=null && valid(saved)) return saved
         for(id in tuners) runCatching {
             resolver.query(android.media.tv.TvContract.buildChannelsUriForInput(id),arrayOf("_id","browsable","type"),null,null,null)?.use { cur ->
                 while(cur.moveToNext()) if(cur.getInt(1)==1 && cur.getString(2)!="TYPE_PREVIEW") return android.media.tv.TvContract.buildChannelUri(cur.getLong(0))
@@ -213,14 +224,18 @@ internal object LiveTuner {
         android.util.Log.i("HomeRedirectService","TUNER no accessible channel; inputs="+tuners.size)
         return null
     }
-    fun open(c:android.content.Context,fast:Boolean=false):Boolean {
+    fun open(c:android.content.Context,fast:Boolean=false,onPower:Boolean=false):Boolean {
         val cached=if(fast) prefs(c).getString("last_tuner_uri",null)?.let { android.net.Uri.parse(it) }?.takeIf { android.media.tv.TvContract.isChannelUriForTunerInput(it) } else null
         val u=cached ?: channel(c) ?: return false
         android.util.Log.i("HomeRedirectService","TUNER cached="+(cached!=null)+" uptime="+SystemClock.elapsedRealtime())
         val i=Intent(Intent.ACTION_VIEW,u).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val result=runCatching { c.startActivity(Intent(i).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")) }.recoverCatching { c.startActivity(Intent(i).setPackage("com.tcl.tv")) }
+        val explicit=Intent(i).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")
+        val result=runCatching {
+            if(onPower) explicit.putExtra("com.google.android.leanbacklauncher.extra.TV_APP_ON_BOOT",true)
+            c.startActivity(explicit)
+        }.recoverCatching { c.startActivity(Intent(i).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")) }.recoverCatching { c.startActivity(Intent(i).setPackage("com.tcl.tv")) }
         if(result.isSuccess) remember(c,u)
-        android.util.Log.i("HomeRedirectService","TUNER explicit channel accepted="+result.isSuccess)
+        android.util.Log.i("HomeRedirectService","TUNER explicit channel accepted="+result.isSuccess+" onPower="+onPower)
         return result.isSuccess
     }
 }
