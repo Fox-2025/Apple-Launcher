@@ -82,8 +82,8 @@ jobs:
                 applicationId = "com.tvos.launcher"
                 minSdk = 28
                 targetSdk = 34
-                versionCode = 19
-                versionName = "2.3-beta.15"
+                versionCode = 20
+                versionName = "2.3-beta.16"
             }
 
             signingConfigs {
