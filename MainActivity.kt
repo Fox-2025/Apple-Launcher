@@ -272,6 +272,10 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         resumed=false
+        if(expandedShelf && ::gridScroll.isInitialized) {
+            expandedShelf=false
+            gridScroll.visibility=View.VISIBLE
+        }
         weatherHandler.removeCallbacks(weatherRefresh)
         if(inputCallbackRegistered) {
             runCatching { tvInputs?.unregisterCallback(inputCallback) }
@@ -634,12 +638,18 @@ class MainActivity : Activity() {
             }
         }
         if(event.action == KeyEvent.ACTION_DOWN && activeMenu == null && ::shelfPlayer.isInitialized) {
+            if(::settings.isInitialized && settings.hasFocus() && (event.keyCode==KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode==KeyEvent.KEYCODE_ENTER)) {
+                swallowKey=event.keyCode
+                if(event.repeatCount==0) showSettings()
+                return true
+            }
             if(expandedShelf) {
                 when(event.keyCode) {
                     KeyEvent.KEYCODE_DPAD_LEFT -> shelfPlayer.next(-1)
                     KeyEvent.KEYCODE_DPAD_RIGHT -> shelfPlayer.next(1)
                     KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_BACK -> setExpanded(false)
-                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> selectedId?.let { id -> apps.firstOrNull { it.id==id }?.let { launch(it) } }
+                    KeyEvent.KEYCODE_DPAD_UP -> { setExpanded(false); settings.requestFocus() }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0 && shelf.hasFocus()) selectedId?.let { id -> apps.firstOrNull { it.id==id }?.let { launch(it) } }
                     else -> return super.dispatchKeyEvent(event)
                 }
                 swallowKey=event.keyCode
@@ -762,6 +772,7 @@ class MainActivity : Activity() {
             background = LiquidGlassDrawable(this,glassSource,dp(22).toFloat())
             setOnClickListener { showSettings() }
             setOnFocusChangeListener { v, focused ->
+                if(focused && expandedShelf) { expandedShelf=false; gridScroll.visibility=View.VISIBLE; shelfPlayer.expand(false) }
                 v.background = LiquidGlassDrawable(v,glassSource,dp(22).toFloat(),focused=focused)
                 v.animate().scaleX(if(focused) 1.10f else 1f).scaleY(if(focused) 1.10f else 1f).setDuration(140).start()
             }
@@ -937,6 +948,8 @@ class MainActivity : Activity() {
 
     private fun setExpanded(value: Boolean) {
         expandedShelf=value
+        shelf.isFocusable=value
+        if(value) shelf.requestFocus()
         gridScroll.visibility=if(value) View.GONE else View.VISIBLE
         shelfPlayer.expand(value)
         if(!value) selectedId?.let { cardViews[it]?.requestFocus() }
@@ -1049,6 +1062,8 @@ class MainActivity : Activity() {
     }
 
     private fun showSettings() {
+        if(expandedShelf) { expandedShelf=false; shelf.isFocusable=false; gridScroll.visibility=View.VISIBLE; shelfPlayer.expand(false) }
+        settings.requestFocus()
         glassMenu(t("Ayarlar","Settings"),arrayOf(t("Genel  ›","General  ›"),t("Görünüm  ›","Appearance  ›"),
             t("Uygulamalar  ›","Applications  ›"),t("Ana ekran  ›","Home screen  ›"),
             t("Top Shelf durumu  ›","Top Shelf status  ›"),t("TV ayarları  ›","TV settings  ›"),t("Hava durumu • ","Weather • ")+weatherCity()+"  ›")) { which ->
@@ -1207,10 +1222,19 @@ class MainActivity : Activity() {
         }
     }
     private fun shelfDiagnostics() {
+        val granted=checkSelfPermission("android.permission.READ_TV_LISTINGS")==android.content.pm.PackageManager.PERMISSION_GRANTED
+        val permission=t("TV veri erişimi: ","TV data access: ")+if(granted) t("İzin verildi","Granted") else t("İzin gerekli","Permission required")
         val entries=tiles().take(columns).map { tile ->
             displayName(tile)+"  ·  "+if(tile.id.startsWith("hdmi:")) tile.subtitle else shelfPlayer.status(tile.id)
         }.ifEmpty { listOf(t("Uygulama yok","No apps")) }
-        glassMenu(t("Top Shelf • IMG: görsel / VID: video","Top Shelf • IMG: image / VID: video"),entries.toTypedArray(),onBack={showSettings()}) { shelfDiagnostics() }
+        glassMenu(t("Top Shelf • IMG: görsel / VID: video","Top Shelf • IMG: image / VID: video"),(listOf(permission)+entries).toTypedArray(),onBack={showSettings()}) { choice ->
+            if(choice==0 && !granted) {
+                runCatching { requestPermissions(arrayOf("android.permission.READ_TV_LISTINGS"),230) }
+                android.app.AlertDialog.Builder(this).setTitle(t("TV veri erişimi","TV data access"))
+                    .setMessage(t("TV izin ekranı açılmazsa bilgisayarda şu komutu çalıştırın:","If the permission screen is unavailable, run this command on your computer:")+"\n\nadb shell pm grant com.tvos.launcher android.permission.READ_TV_LISTINGS")
+                    .setPositiveButton("OK") { _,_ -> shelfDiagnostics() }.show()
+            } else shelfDiagnostics()
+        }
     }
 
     private fun glass(focused: Boolean, radius: Int = 22): GradientDrawable =
