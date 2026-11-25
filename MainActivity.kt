@@ -10,6 +10,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -31,11 +32,25 @@ class MainActivity : Activity() {
     private lateinit var root: LinearLayout
     private lateinit var backdropImage: ImageView
     private lateinit var backdropTint: View
+    private lateinit var shelfPlayer: TvShelf
+    private lateinit var videoSurface: android.view.TextureView
+    private lateinit var gridScroll: ScrollView
+    private var expandedShelf = false
+    private var shelfKey: String? = null
+    private var resumed = false
+    private val regularFont by lazy { runCatching { Typeface.createFromAsset(assets,"fonts/Inter-Regular.ttf") }.getOrElse { Typeface.create("sans-serif",Typeface.NORMAL) } }
+    private val mediumFont by lazy { runCatching { Typeface.createFromAsset(assets,"fonts/Inter-Medium.ttf") }.getOrElse { Typeface.create("sans-serif-medium",Typeface.NORMAL) } }
+    private fun uiFont(bold: Boolean) = if(bold) mediumFont else regularFont
     private val worker = Executors.newSingleThreadExecutor()
     private var importing: Pair<String, Boolean>? = null
     private var pendingFetch = false
     private var storeIcons = true
     private var largeIcons = false
+    private var movingId: String? = null
+    private var moveOrder: MutableList<String>? = null
+    private lateinit var moveHint: TextView
+    private val columns = 6
+    private var swallowKey = -1
     private var english = false
     private fun t(tr: String, en: String) = if (english) en else tr
     private var activeMenu: Dialog? = null
@@ -75,10 +90,9 @@ class MainActivity : Activity() {
         light = prefs.getBoolean("light", false)
         english = prefs.getString("language", "tr") == "en"
         storeIcons = prefs.getBoolean("store_icons", true)
-        largeIcons = prefs.getBoolean("large_icons", false)
-        demo = prefs.getBoolean("demo", false)
+        largeIcons = false
+        demo = false
         apps = installed()
-        if (!prefs.contains("demo") && apps.size < 5) demo = true
         selectedId = savedInstanceState?.getString("selected")
         buildHome()
         fetchStoreIcons()
@@ -86,6 +100,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        resumed = true
         immersive()
         if (::rows.isInitialized) {
             val next = installed()
@@ -95,6 +110,20 @@ class MainActivity : Activity() {
                 fetchStoreIcons()
             }
         }
+        if(::shelfPlayer.isInitialized && selectedId != null) { shelfKey=null; updateShelf(apps.firstOrNull { it.id==selectedId }) }
+    }
+
+    override fun onPause() {
+        resumed=false
+        if(::shelfPlayer.isInitialized) shelfPlayer.stop()
+        shelfKey=null
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        if(::shelfPlayer.isInitialized) shelfPlayer.destroy()
+        worker.shutdownNow()
+        super.onDestroy()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -311,11 +340,91 @@ class MainActivity : Activity() {
     }
 
     private fun tiles(): List<Tile> {
-        val source = if (demo) samples() + apps else apps
-        val available = source.filter { showHidden || it.id !in hidden }
-        return available.sortedWith(compareBy<Tile> { if (it.id in favorites) 0 else 1 }
-            .thenBy { if (it.id in order) order.indexOf(it.id) else Int.MAX_VALUE }
-            .thenBy { source.indexOf(it) })
+        val ranks = moveOrder ?: order
+        return apps.filter { showHidden || it.id !in hidden }.sortedBy {
+            ranks.indexOf(it.id).let { rank -> if(rank < 0) Int.MAX_VALUE else rank }
+        }
+    }
+
+    private fun beginMove(tile: Tile) {
+        movingId = tile.id
+        moveOrder = tiles().map { it.id }.toMutableList()
+        selectedId = tile.id
+        refreshCards()
+    }
+
+    private fun finishMove(commit: Boolean) {
+        if(commit) {
+            val next = moveOrder.orEmpty()
+            order = (next + order.filterNot { it in next }).toMutableList()
+            save()
+        }
+        movingId = null
+        moveOrder = null
+        refreshCards()
+    }
+
+    @Deprecated("Android legacy back callback")
+    override fun onBackPressed() {
+        if(movingId != null) finishMove(false)
+        else if(expandedShelf) setExpanded(false)
+        else {
+            selectedId = tiles().firstOrNull()?.id
+            selectedId?.let { cardViews[it]?.requestFocus() } ?: settings.requestFocus()
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if(event.keyCode == swallowKey) {
+            if(event.action == KeyEvent.ACTION_UP) swallowKey = -1
+            return true
+        }
+        if(movingId != null) {
+            val keys = setOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BACK)
+            if(event.keyCode in keys) {
+                if(event.action == KeyEvent.ACTION_DOWN) {
+                    val list = moveOrder ?: return true
+                    val i = list.indexOf(movingId)
+                    val target = when(event.keyCode) {
+                        KeyEvent.KEYCODE_DPAD_LEFT -> if(i % columns > 0) i-1 else i
+                        KeyEvent.KEYCODE_DPAD_RIGHT -> if(i % columns < columns-1) i+1 else i
+                        KeyEvent.KEYCODE_DPAD_UP -> i-columns
+                        KeyEvent.KEYCODE_DPAD_DOWN -> if(i/columns < list.lastIndex/columns) minOf(i+columns,list.lastIndex) else i
+                        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { swallowKey=event.keyCode; finishMove(true); return true }
+                        KeyEvent.KEYCODE_BACK -> { swallowKey=event.keyCode; finishMove(false); return true }
+                        else -> i
+                    }
+                    if(i >= 0 && target in list.indices && target != i) {
+                        val id = list.removeAt(i)
+                        list.add(target,id)
+                        selectedId=id
+                        refreshCards()
+                    }
+                }
+                return true
+            }
+        }
+        if(event.action == KeyEvent.ACTION_DOWN && activeMenu == null && ::shelfPlayer.isInitialized) {
+            if(expandedShelf) {
+                when(event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> shelfPlayer.next(-1)
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> shelfPlayer.next(1)
+                    KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_BACK -> setExpanded(false)
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> selectedId?.let { id -> apps.firstOrNull { it.id==id }?.let { launch(it) } }
+                    else -> return super.dispatchKeyEvent(event)
+                }
+                swallowKey=event.keyCode
+                return true
+            }
+            if(event.keyCode==KeyEvent.KEYCODE_DPAD_UP && shelfPlayer.available && tiles().take(columns).any { it.id==selectedId && cardViews[it.id]?.hasFocus()==true }) {
+                setExpanded(true)
+                swallowKey=event.keyCode
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     private fun text(value: String, size: Float, color: Int, bold: Boolean = false) =
@@ -323,7 +432,8 @@ class MainActivity : Activity() {
             text = value
             textSize = size
             setTextColor(color)
-            if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            typeface = uiFont(bold)
+            letterSpacing = -0.015f
             includeFontPadding = false
         }
 
@@ -345,6 +455,9 @@ class MainActivity : Activity() {
     }
 
     private fun buildHome() {
+        if(::shelfPlayer.isInitialized) shelfPlayer.destroy()
+        shelfKey=null
+        expandedShelf=false
         cardViews.clear()
         val metrics = resources.displayMetrics
         val screenH = (metrics.heightPixels / metrics.density).toInt()
@@ -357,10 +470,21 @@ class MainActivity : Activity() {
         val frame = FrameLayout(this).apply { setBackgroundColor(bg()) }
         backdropImage = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
         frame.addView(backdropImage, FrameLayout.LayoutParams(-1, -1))
+        videoSurface = android.view.TextureView(this)
+        frame.addView(videoSurface,FrameLayout.LayoutParams(-1,-1))
         backdropTint = View(this)
         frame.addView(backdropTint, FrameLayout.LayoutParams(-1, -1))
         frame.addView(root, FrameLayout.LayoutParams(-1, -1))
         setContentView(frame)
+        shelfPlayer = TvShelf(this,videoSurface) { item, bitmap ->
+            if(item != null) {
+                heroTitle.text=item.title.ifBlank { apps.firstOrNull { it.id==selectedId }?.let { displayName(it) }.orEmpty() }
+                heroSub.text=item.description
+                heroArt.visibility=View.INVISIBLE
+                if(bitmap!=null) backdropImage.setImageBitmap(bitmap)
+                backdropTint.background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(0x08000000,0x22000000,0xdd080b12.toInt()))
+            }
+        }
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -376,6 +500,7 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             setPadding(dp(22), 0, dp(20), 0)
         }
+        clock.typeface=uiFont(false)
         header.addView(clock)
         settings = text("⚙", 24f, Color.WHITE, true).apply {
             contentDescription = t("Başlatıcı ayarları", "Launcher settings")
@@ -438,9 +563,14 @@ class MainActivity : Activity() {
             setPadding(dp(3), dp(8), dp(3), dp(14))
         }
         scroll.addView(rows, FrameLayout.LayoutParams(-1, -2))
+        gridScroll=scroll
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        val hint = text(t("↑ ↓ ← →  Gezin   •   OK  Aç   •   OK uzun bas  Düzenle", "↑ ↓ ← →  Navigate   •   OK  Open   •   Hold OK  Edit"), 11f, muted())
-        hint.visibility = View.GONE
+        moveHint = text(t("Yön tuşları: Taşı    •    OK: Kaydet    •    Geri: İptal", "Arrows: Move    •    OK: Save    •    Back: Cancel"), 15f, Color.WHITE, true)
+        moveHint.gravity = Gravity.CENTER
+        moveHint.background = glass(false)
+        moveHint.setPadding(dp(10),dp(6),dp(10),dp(6))
+        moveHint.visibility = View.GONE
+        root.addView(moveHint, LinearLayout.LayoutParams(-1,-2))
         refreshCards()
     }
 
@@ -448,16 +578,16 @@ class MainActivity : Activity() {
         rows.removeAllViews()
         cardViews.clear()
         val data = tiles()
-        modeLabel.text = if (demo) "DEMO" else ""
+        modeLabel.text = ""
+        moveHint.visibility = if(movingId != null) View.VISIBLE else View.GONE
         section.text = if (showHidden) t("Tüm uygulamalar", "All applications") else if (favorites.isNotEmpty()) t("Favoriler ve uygulamalar", "Favorites and applications") else t("Uygulamalar", "Applications")
         if (data.isEmpty()) {
-            rows.addView(text(t("Uygulama bulunamadı. Ayarlar menüsünden demo modunu açabilirsin.", "No applications found. Enable demo mode in settings."), 17f, muted()))
+            rows.addView(text(t("Uygulama bulunamadı.", "No applications found."), 17f, muted()))
             updateShelf(null)
             settings.requestFocus()
             return
         }
         val screenW = (resources.displayMetrics.widthPixels / resources.displayMetrics.density).toInt()
-        val columns = if (largeIcons) 5 else 6
         val height = ((screenW - 130) / columns.toFloat() / (5f/3f)).roundToInt().coerceIn(48, 190)
         for ((rowIndex, group) in data.chunked(columns).withIndex()) {
             val row = LinearLayout(this).apply {
@@ -531,20 +661,31 @@ class MainActivity : Activity() {
             setPadding(0,dp(7),0,dp(2))
         }
         holder.addView(label, LinearLayout.LayoutParams(-1,-2))
-        holder.setOnClickListener { launch(tile) }
-        holder.setOnLongClickListener { edit(tile); true }
+        holder.setOnClickListener { if(movingId != null) finishMove(true) else launch(tile) }
+        holder.setOnLongClickListener { if(movingId == null) edit(tile); true }
         holder.setOnFocusChangeListener { view, focus ->
             view.animate().scaleX(if(focus) 1.12f else 1f).scaleY(if(focus) 1.12f else 1f).setDuration(150).start()
             view.translationZ = if(focus) dp(14).toFloat() else 0f
             panel.elevation = if(focus) dp(12).toFloat() else dp(3).toFloat()
-            border.background = rounded(Color.TRANSPARENT, 13, if(focus) Color.WHITE else Color.TRANSPARENT, 2)
+            border.background = rounded(Color.TRANSPARENT, 13, if(movingId == tile.id) 0xff9edaff.toInt() else if(focus) Color.WHITE else Color.TRANSPARENT, if(movingId == tile.id) 3 else 2)
             label.setTextColor(if(focus) Color.WHITE else Color.TRANSPARENT)
             if (focus) { selectedId = tile.id; updateShelf(tile) }
         }
         return holder
     }
 
+    private fun setExpanded(value: Boolean) {
+        expandedShelf=value
+        gridScroll.visibility=if(value) View.GONE else View.VISIBLE
+        shelfPlayer.expand(value)
+        if(!value) selectedId?.let { cardViews[it]?.requestFocus() }
+    }
+
     private fun updateShelf(tile: Tile?) {
+        val newKey=tile?.id?.takeIf { id -> tiles().take(columns).any { it.id==id } }
+        if(shelfKey==newKey && newKey!=null && shelfPlayer.available) return
+        shelfKey=newKey
+        if(::shelfPlayer.isInitialized) shelfPlayer.select(if(resumed && movingId==null) newKey else null)
         val color = tile?.color ?: 0xff25466c.toInt()
         shelf.background = rounded(Color.TRANSPARENT, 0)
         val customBg = tile?.let { asset(it, "backdrop") }?.takeIf { it.isFile }
@@ -553,7 +694,7 @@ class MainActivity : Activity() {
             if (customBg != null) intArrayOf(0x22000000, 0x55000000, 0xee080b12.toInt())
             else intArrayOf(blend(color, if(light) Color.WHITE else Color.BLACK, if(light) .2f else .28f), 0xff171c27.toInt(), 0xff080b12.toInt()))
         heroTitle.text = tile?.let { displayName(it) } ?: t("Ana Ekran", "Home")
-        heroSub.text = if(tile == null) t("Ayarlar üzerinden demo modunu aç", "Enable demo mode in settings")
+        heroSub.text = if(tile == null) t("Uygulama seç", "Choose an app")
             else if(tile.launch == null) tile.subtitle + "  •  Demo" else tile.subtitle
         heroArt.tile = tile
         heroArt.visibility = if (customBg != null) View.INVISIBLE else View.VISIBLE
@@ -572,26 +713,22 @@ class MainActivity : Activity() {
     }
 
     private fun edit(tile: Tile) {
-        val list = tiles().map { it.id }.toMutableList()
-        val actions = arrayOf(if(tile.id in favorites) t("Favorilerden çıkar", "Remove from favorites") else t("Favorilere ekle", "Add to favorites"),
-            if(tile.id in hidden) t("Göster", "Show") else t("Gizle", "Hide"), t("Bir sıra sola taşı", "Move left"), t("Bir sıra sağa taşı", "Move right"), t("Kendi ikonunu seç", "Choose custom icon"), t("Arka plan görselini seç", "Choose background image"), t("Özel görselleri kaldır", "Remove custom artwork"), t("Uygulama adını değiştir", "Rename application"), t("Orijinal adı geri yükle", "Restore original name"))
+        val actions = arrayOf(t("Taşı","Move"),
+            if(tile.id in hidden) t("Göster","Show") else t("Gizle","Hide"),
+            t("Uygulama adını değiştir","Rename application"),
+            t("Kendi ikonunu seç","Choose custom icon"),
+            t("Arka plan görselini seç","Choose background image"),
+            t("Özel görselleri kaldır","Remove custom artwork"),
+            t("Orijinal adı geri yükle","Restore original name"))
         glassMenu(displayName(tile), actions) { which ->
             when(which) {
-                0 -> if(tile.id in favorites) favorites.remove(tile.id) else favorites.add(tile.id)
+                0 -> { beginMove(tile); return@glassMenu }
                 1 -> if(tile.id in hidden) hidden.remove(tile.id) else hidden.add(tile.id)
-                4 -> { chooseArt(tile, false); return@glassMenu }
-                5 -> { chooseArt(tile, true); return@glassMenu }
-                6 -> { asset(tile, "custom").delete(); asset(tile, "backdrop").delete() }
-                7 -> { rename(tile); return@glassMenu }
-                8 -> prefs.edit().remove("name_" + tile.id).apply()
-                2,3 -> {
-                    val i = list.indexOf(tile.id)
-                    val j = i + if(which == 2) -1 else 1
-                    if(i >= 0 && j in list.indices && (list[j] in favorites) == (tile.id in favorites)) {
-                        java.util.Collections.swap(list, i, j)
-                        order = (list + order.filterNot { it in list }).toMutableList()
-                    }
-                }
+                2 -> { rename(tile); return@glassMenu }
+                3 -> { chooseArt(tile,false); return@glassMenu }
+                4 -> { chooseArt(tile,true); return@glassMenu }
+                5 -> { asset(tile,"custom").delete(); asset(tile,"backdrop").delete() }
+                6 -> prefs.edit().remove("name_" + tile.id).apply()
             }
             save()
             refreshCards()
@@ -599,26 +736,38 @@ class MainActivity : Activity() {
     }
 
     private fun showSettings() {
-        val actions = arrayOf(if(demo) t("Demo modunu kapat", "Disable demo mode") else t("Demo modunu aç", "Enable demo mode"),
-            if(light) t("Koyu temaya geç", "Switch to dark theme") else t("Açık temaya geç", "Switch to light theme"),
-            if(showHidden) t("Gizli uygulamaları gizle", "Hide hidden applications") else t("Gizli uygulamaları göster", "Show hidden applications"),
-            t("Uygulamaları yenile", "Refresh applications"), t("Android ayarları", "Android settings"),
-            if (storeIcons) t("Apple TV mağaza ikonlarını kapat", "Disable Apple TV store icons") else t("Apple TV mağaza ikonlarını aç", "Enable Apple TV store icons"),
-            if (largeIcons) t("6 sütun", "6 columns") else t("5 büyük sütun", "5 large columns"), t("Varsayılan ana ekran seçimi", "Default home screen"), t("Dil  ·  Türkçe", "Language  ·  English"))
-        glassMenu(t("Başlatıcı ayarları", "Launcher settings"), actions) { which ->
+        val actions = arrayOf(t("Genel  ›","General  ›"),t("Görünüm  ›","Appearance  ›"),
+            t("Uygulamalar  ›","Applications  ›"),t("Varsayılan ana ekran","Default home screen"),t("TV ayarları","TV settings"))
+        glassMenu(t("Ayarlar","Settings"),actions) { which ->
             when(which) {
-                0 -> { demo = !demo; save(); refreshCards(); fetchStoreIcons() }
-                1 -> { light = !light; save(); buildHome() }
-                2 -> { showHidden = !showHidden; refreshCards() }
-                3 -> { apps = installed(); refreshCards(); fetchStoreIcons() }
-                5 -> { storeIcons = !storeIcons; save(); refreshCards(); fetchStoreIcons() }
-                6 -> { largeIcons = !largeIcons; save(); refreshCards() }
-                8 -> languageMenu()
-                7 -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_HOME_SETTINGS)) }
-                    .onFailure { Toast.makeText(this, t("TV yazılımı ana ekran seçimine izin vermiyor olabilir.", "TV firmware may not allow home screen selection."), Toast.LENGTH_LONG).show() }
+                0 -> glassMenu(t("Genel","General"),arrayOf(t("Dil  ·  Türkçe","Language  ·  English"))) { languageMenu() }
+                1 -> glassMenu(t("Görünüm","Appearance"),arrayOf(if(light) t("Koyu","Dark") else t("Açık","Light"))) { light=!light; save(); buildHome() }
+                2 -> glassMenu(t("Uygulamalar","Applications"),arrayOf(
+                    if(showHidden) t("Gizli uygulamaları gizle","Hide hidden apps") else t("Gizli uygulamaları göster","Show hidden apps"),
+                    if(storeIcons) t("Apple TV ikonlarını kapat","Disable Apple TV icons") else t("Apple TV ikonlarını aç","Enable Apple TV icons"),
+                    t("Uygulamaları yenile","Refresh apps"))) { choice ->
+                    when(choice) {
+                        0 -> { showHidden=!showHidden; refreshCards() }
+                        1 -> { storeIcons=!storeIcons; save(); refreshCards(); fetchStoreIcons() }
+                        2 -> { apps=installed(); refreshCards(); fetchStoreIcons() }
+                    }
+                }
+                3 -> homeSettings()
                 4 -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_SETTINGS)) }
-                    .onFailure { Toast.makeText(this, t("Ayarlar açılamadı", "Could not open settings"), Toast.LENGTH_SHORT).show() }
+                    .onFailure { Toast.makeText(this,t("Ayarlar açılamadı","Could not open settings"),Toast.LENGTH_SHORT).show() }
             }
+        }
+    }
+
+    private fun homeSettings() {
+        val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        val current = packageManager.resolveActivity(home,android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+        val isDefault = current?.activityInfo?.packageName == packageName
+        val status = if(isDefault) t("Bu başlatıcı varsayılan","This launcher is default") else t("Henüz varsayılan değil","Not yet default")
+        glassMenu(status,arrayOf(t("Sistem ana ekran seçimi","System home selection"),t("ADB kurulum bilgisi","ADB setup information"))) { choice ->
+            if(choice==0) runCatching { startActivity(Intent(android.provider.Settings.ACTION_HOME_SETTINGS)) }
+                .onFailure { Toast.makeText(this,t("TV yazılımı seçimi engelliyor. ADB bilgisine bak.","Firmware blocks selection. See ADB information."),Toast.LENGTH_LONG).show() }
+            else glassMenu(t("Bilgisayardan ADB","ADB from computer"),arrayOf("adb shell cmd package set-home-activity com.tvos.launcher/.MainActivity")) { }
         }
     }
 
@@ -638,7 +787,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18),dp(16),dp(18),dp(16))
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                intArrayOf(0xeb536477.toInt(),0xeb273444.toInt(),0xf0182332.toInt())).apply {
+                intArrayOf(0xc23c4653.toInt(),0xd527303b.toInt(),0xe017202b.toInt())).apply {
                 cornerRadius = dp(30).toFloat()
                 setStroke(dp(1),0x88ffffff.toInt())
             }
@@ -669,7 +818,14 @@ class MainActivity : Activity() {
         val height = (metrics.heightPixels * .86f).roundToInt()
         win.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        win.setDimAmount(.25f)
+        win.setDimAmount(.15f)
+        if(android.os.Build.VERSION.SDK_INT >= 31) {
+            win.setBackgroundBlurRadius(dp(26))
+            win.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+            val blurAttrs = win.attributes
+            blurAttrs.blurBehindRadius = dp(12)
+            win.attributes = blurAttrs
+        }
         win.setLayout(width,height)
         win.setGravity(Gravity.TOP or Gravity.END)
         val attrs = win.attributes
@@ -685,9 +841,9 @@ class MainActivity : Activity() {
             isClickable = true
             setPadding(dp(14),dp(9),dp(14),dp(9))
             minHeight = dp(40)
-            background = rounded(0x18ffffff, 15)
+            background = rounded(Color.TRANSPARENT, 15)
             setOnFocusChangeListener { v, focused ->
-                v.background = if (focused) glass(true, 15) else rounded(0x18ffffff,15)
+                v.background = if (focused) glass(true, 15) else rounded(Color.TRANSPARENT,15)
                 setTextColor(if (focused) 0xff101b29.toInt() else Color.WHITE)
             }
             setOnClickListener { onClick() }
@@ -721,6 +877,8 @@ class MainActivity : Activity() {
         val (dialog, _, items) = newGlassDialog(t("Uygulama adını değiştir", "Rename application"))
         val field = EditText(this).apply {
             setText(displayName(tile))
+            typeface = uiFont(false)
+            letterSpacing = -0.015f
             setTextColor(Color.WHITE)
             setSingleLine(true)
             setPadding(dp(12),dp(12),dp(12),dp(12))
