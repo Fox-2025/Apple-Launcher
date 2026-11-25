@@ -21,13 +21,14 @@ class HomeRedirectService : AccessibilityService() {
     private var wakeAttempt=0
     private var stockSeen=false
     private var wakeStarted=0L
+    private var coldBoot=false
     private val openLive=object:Runnable {
         override fun run() {
             if(!wakePending) return
             if(!prefs.getBoolean("live_on_power",true) || powerManager?.isInteractive!=true || !connected) {
                 wakePending=false; return
             }
-            val accepted=LiveTuner.open(this@HomeRedirectService)
+            val accepted=LiveTuner.open(this@HomeRedirectService,fast=coldBoot && wakeAttempt==0)
             wakeAttempt++
             android.util.Log.i("HomeRedirectService","POWER tuner accepted="+accepted+" attempt="+wakeAttempt+" elapsed="+(SystemClock.elapsedRealtime()-wakeStarted))
             if(!accepted && wakeAttempt<2) { powerHandler.postDelayed(this,650); return }
@@ -35,9 +36,10 @@ class HomeRedirectService : AccessibilityService() {
             if(!accepted && stockSeen) redirectHome()
         }
     }
-    private fun scheduleLive() {
+    private fun scheduleLive(boot:Boolean=false) {
         if(!prefs.getBoolean("live_on_power",true) || wakePending) return
-        wakePending=true; wakeAttempt=0; stockSeen=false; wakeStarted=SystemClock.elapsedRealtime()
+        wakePending=true; wakeAttempt=0; stockSeen=false; coldBoot=boot; wakeStarted=SystemClock.elapsedRealtime()
+        android.util.Log.i("HomeRedirectService","POWER scheduling boot="+boot+" uptime="+wakeStarted)
         powerHandler.removeCallbacks(openLive)
         powerHandler.postDelayed(openLive,150)
     }
@@ -54,17 +56,30 @@ class HomeRedirectService : AccessibilityService() {
         override fun onReceive(context:android.content.Context?,intent:Intent?) {
             when(intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> { screenWasOff=true; wakePending=false; stockSeen=false; prefs.edit().putBoolean("screen_off_pending",true).apply(); powerHandler.removeCallbacks(openLive); android.util.Log.i("HomeRedirectService","POWER screen_off") }
-                Intent.ACTION_SCREEN_ON -> { android.util.Log.i("HomeRedirectService","POWER screen_on"); if(screenWasOff || prefs.getBoolean("screen_off_pending",false)) { screenWasOff=false; prefs.edit().remove("screen_off_pending").apply(); scheduleLive() } }
+                Intent.ACTION_SCREEN_ON -> { android.util.Log.i("HomeRedirectService","POWER screen_on"); val boot=tryEarlyBoot(); if(screenWasOff || prefs.getBoolean("screen_off_pending",false)) { screenWasOff=false; prefs.edit().remove("screen_off_pending").apply(); if(!boot) scheduleLive() } }
             }
         }
+    }
+    private fun tryEarlyBoot():Boolean {
+        BootSession.observe(this)
+        if(powerManager?.isInteractive!=true || wakePending || !prefs.getBoolean("live_on_power",true)) return false
+        if(!BootSession.claimEarly(this)) return false
+        prefs.edit().remove("screen_off_pending").remove("live_boot_pending").apply()
+        screenWasOff=false
+        scheduleLive(boot=true)
+        return true
     }
     private fun consumeBoot() {
         val at=prefs.getLong("live_boot_pending",-1L)
         if(at<0) return
         prefs.edit().remove("live_boot_pending").apply()
-        if(SystemClock.elapsedRealtime()-at in 0..120000L) {
-            if(powerManager?.isInteractive==true) scheduleLive() else screenWasOff=true
-        }
+        if(SystemClock.elapsedRealtime()-at !in 0..120000L || !prefs.getBoolean("live_on_power",true)) return
+        if(BootSession.wasHandled(this)) return
+        if(powerManager?.isInteractive==true) {
+            if(tryEarlyBoot()) return
+            BootSession.markHandled(this)
+            scheduleLive(boot=true)
+        } else { screenWasOff=true; prefs.edit().putBoolean("screen_off_pending",true).apply() }
     }
     private fun stopPower() {
         powerHandler.removeCallbacks(openLive)
@@ -87,8 +102,9 @@ class HomeRedirectService : AccessibilityService() {
             if(android.os.Build.VERSION.SDK_INT>=33) registerReceiver(screenReceiver,filter,android.content.Context.RECEIVER_NOT_EXPORTED) else registerReceiver(screenReceiver,filter)
             receiverRegistered=true
         }
+        val early=tryEarlyBoot()
         consumeBoot()
-        if(powerManager?.isInteractive==true && prefs.getBoolean("screen_off_pending",false)) { prefs.edit().remove("screen_off_pending").apply(); scheduleLive() }
+        if(!early && powerManager?.isInteractive==true && prefs.getBoolean("screen_off_pending",false)) { prefs.edit().remove("screen_off_pending").apply(); scheduleLive() }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -99,6 +115,8 @@ class HomeRedirectService : AccessibilityService() {
         // Avoid redirecting configuration, account, permission or onboarding panels.
         val name = cls.substringAfterLast('.')
         if (name !in setOf("HomeActivity","MainActivity","LauncherActivity","TvLauncherActivity")) return
+        // A changed boot count is available before the delayed BOOT_COMPLETED broadcast.
+        tryEarlyBoot()
         // During a confirmed wake only, skip our launcher and try the tuner first.
         if(wakePending) {
             stockSeen=true
@@ -115,6 +133,7 @@ class HomeRedirectService : AccessibilityService() {
     companion object {
         private var activeInstance:HomeRedirectService?=null
         internal fun notifyBoot() { activeInstance?.consumeBoot() }
+        internal fun observeLauncher(c:android.content.Context) { BootSession.observe(c); activeInstance?.tryEarlyBoot() }
         @Volatile var connected=false
             private set
         private val STOCK_HOME = setOf("com.google.android.apps.tv.launcherx","com.google.android.tvlauncher")
@@ -125,9 +144,37 @@ class HomeRedirectService : AccessibilityService() {
 class LiveBootReceiver:android.content.BroadcastReceiver() {
     override fun onReceive(context:android.content.Context,intent:Intent) {
         if(intent.action!=Intent.ACTION_BOOT_COMPLETED) return
+        BootSession.observe(context)
+        if(BootSession.wasHandled(context)) return
         context.getSharedPreferences("launcher_prefs",android.content.Context.MODE_PRIVATE).edit()
             .putLong("live_boot_pending",SystemClock.elapsedRealtime()).apply()
         HomeRedirectService.notifyBoot()
+    }
+}
+
+/** A real boot changes Settings.Global.boot_count. Seed on update; never infer a boot from Home alone. */
+internal object BootSession {
+    private fun prefs(c:android.content.Context)=c.getSharedPreferences("launcher_prefs",android.content.Context.MODE_PRIVATE)
+    private fun count(c:android.content.Context)=runCatching { android.provider.Settings.Global.getInt(c.contentResolver,"boot_count",-1) }.getOrDefault(-1)
+    @Synchronized fun observe(c:android.content.Context) {
+        val n=count(c); if(n<0) return
+        val p=prefs(c); val old=p.getInt("observed_boot_count",-1)
+        if(old==n) return
+        val early=old>=0 && SystemClock.elapsedRealtime()<=180000L && p.getBoolean("live_on_power",true)
+        p.edit().putInt("observed_boot_count",n).putInt("early_boot_count",if(early) n else -1).apply()
+        android.util.Log.i("HomeRedirectService","BOOT count="+n+" previous="+old+" early="+early+" uptime="+SystemClock.elapsedRealtime())
+    }
+    @Synchronized fun claimEarly(c:android.content.Context):Boolean {
+        val n=count(c); val p=prefs(c)
+        if(n<0 || p.getInt("early_boot_count",-1)!=n || p.getInt("handled_boot_count",-1)==n || SystemClock.elapsedRealtime()>180000L) return false
+        p.edit().putInt("handled_boot_count",n).remove("early_boot_count").apply()
+        return true
+    }
+    @Synchronized fun wasHandled(c:android.content.Context):Boolean {
+        val n=count(c); return n>=0 && prefs(c).getInt("handled_boot_count",-1)==n
+    }
+    @Synchronized fun markHandled(c:android.content.Context) {
+        val n=count(c); if(n>=0) prefs(c).edit().putInt("handled_boot_count",n).remove("early_boot_count").apply()
     }
 }
 
@@ -166,8 +213,10 @@ internal object LiveTuner {
         android.util.Log.i("HomeRedirectService","TUNER no accessible channel; inputs="+tuners.size)
         return null
     }
-    fun open(c:android.content.Context):Boolean {
-        val u=channel(c) ?: return false
+    fun open(c:android.content.Context,fast:Boolean=false):Boolean {
+        val cached=if(fast) prefs(c).getString("last_tuner_uri",null)?.let { android.net.Uri.parse(it) }?.takeIf { android.media.tv.TvContract.isChannelUriForTunerInput(it) } else null
+        val u=cached ?: channel(c) ?: return false
+        android.util.Log.i("HomeRedirectService","TUNER cached="+(cached!=null)+" uptime="+SystemClock.elapsedRealtime())
         val i=Intent(Intent.ACTION_VIEW,u).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val result=runCatching { c.startActivity(Intent(i).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")) }.recoverCatching { c.startActivity(Intent(i).setPackage("com.tcl.tv")) }
         if(result.isSuccess) remember(c,u)
