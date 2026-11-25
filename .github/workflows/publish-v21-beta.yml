@@ -1,0 +1,36 @@
+name: Publish v2.1 beta APK
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v21-beta.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: v2.1.0-beta.1
+    steps:
+      - name: Download verified APK
+        run: |
+          gh run download 45621721995 --name app-debug --dir dist
+          test -s dist/app-debug.apk
+          mv dist/app-debug.apk dist/Apple-Launcher-v2.1.0-beta.1.apk
+      - name: Publish prerelease
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release already exists; not overwriting."
+            exit 0
+          fi
+          gh release create "$TAG" dist/Apple-Launcher-v2.1.0-beta.1.apk \
+            --target 86e96ea75e67b27458cb4b02db866e37fb7b39be \
+            --title "Apple Launcher v2.1.0-beta.1 - Glass Edition" \
+            --prerelease \
+            --notes "Translucent dock, six or five columns, focus-sensitive full-screen backgrounds, optional TV App Store artwork retrieval, personal artwork import and system Home settings shortcut. Android 9+. Debug-signed APK from successful run 45621721995. Icon retrieval and TCL device behavior still require runtime testing. An existing beta may need uninstalling if debug signing keys differ."
