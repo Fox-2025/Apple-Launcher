@@ -19,13 +19,13 @@ jobs:
         mkdir -p app/src/main/res/layout
 
         cp -f *.kt app/src/main/java/com/tvos/launcher/
-        cp -f "AndroidManifest.xml" app/src/main/AndroidManifest.xml
-        cp -f "item_app.xml" app/src/main/res/layout/item_app.xml
+        cp -f AndroidManifest.xml app/src/main/AndroidManifest.xml
+        cp -f item_app.xml app/src/main/res/layout/item_app.xml
         cp -rf res/* app/src/main/res/
 
         rm -f build.gradle build.gradle.kts app/build.gradle app/build.gradle.kts
-        cp -f "build.gradle (project)" build.gradle.kts
-        cp -f "build.gradle (App)" app/build.gradle.kts
+        cp -f *project* build.gradle.kts
+        cp -f *App* app/build.gradle.kts
 
         rm -f settings.gradle settings.gradle.kts
         printf 'pluginManagement {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)\n    repositories {\n        google()\n        mavenCentral()\n    }\n}\nrootProject.name = "Apple-Launcher"\ninclude(":app")\n' > settings.gradle.kts
