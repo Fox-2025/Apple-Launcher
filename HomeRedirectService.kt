@@ -19,25 +19,19 @@ class HomeRedirectService : AccessibilityService() {
     private val powerManager by lazy { getSystemService(android.os.PowerManager::class.java) }
     private val openLive=Runnable {
         if(prefs.getBoolean("live_on_power",true) && powerManager?.isInteractive==true && connected) {
-            val intent=Intent(Intent.ACTION_MAIN).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-            val result=runCatching { startActivity(intent) }.recoverCatching {
-                val fallback=packageManager.getLeanbackLaunchIntentForPackage("com.tcl.tv")
-                    ?: packageManager.getLaunchIntentForPackage("com.tcl.tv") ?: throw it
-                startActivity(fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
-            android.util.Log.i("HomeRedirectService","POWER live_tv accepted="+result.isSuccess)
+            val accepted=LiveTuner.open(this)
+            android.util.Log.i("HomeRedirectService","POWER tuner accepted="+accepted)
         }
     }
     private fun scheduleLive() {
         powerHandler.removeCallbacks(openLive)
-        if(prefs.getBoolean("live_on_power",true)) powerHandler.postDelayed(openLive,1500)
+        if(prefs.getBoolean("live_on_power",true)) powerHandler.postDelayed(openLive,3000)
     }
     private val screenReceiver=object:android.content.BroadcastReceiver() {
         override fun onReceive(context:android.content.Context?,intent:Intent?) {
             when(intent?.action) {
-                Intent.ACTION_SCREEN_OFF -> { screenWasOff=true; powerHandler.removeCallbacks(openLive) }
-                Intent.ACTION_SCREEN_ON -> if(screenWasOff) { screenWasOff=false; scheduleLive() }
+                Intent.ACTION_SCREEN_OFF -> { screenWasOff=true; prefs.edit().putBoolean("screen_off_pending",true).apply(); powerHandler.removeCallbacks(openLive); android.util.Log.i("HomeRedirectService","POWER screen_off") }
+                Intent.ACTION_SCREEN_ON -> { android.util.Log.i("HomeRedirectService","POWER screen_on"); if(screenWasOff || prefs.getBoolean("screen_off_pending",false)) { screenWasOff=false; prefs.edit().remove("screen_off_pending").apply(); scheduleLive() } }
             }
         }
     }
@@ -70,6 +64,7 @@ class HomeRedirectService : AccessibilityService() {
             receiverRegistered=true
         }
         consumeBoot()
+        if(powerManager?.isInteractive==true && prefs.getBoolean("screen_off_pending",false)) { prefs.edit().remove("screen_off_pending").apply(); scheduleLive() }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -108,5 +103,50 @@ class LiveBootReceiver:android.content.BroadcastReceiver() {
         context.getSharedPreferences("launcher_prefs",android.content.Context.MODE_PRIVATE).edit()
             .putLong("live_boot_pending",SystemClock.elapsedRealtime()).apply()
         HomeRedirectService.notifyBoot()
+    }
+}
+
+/** Use an actual tuner channel, never a generic TV activity that can restore HDMI. */
+internal object LiveTuner {
+    private fun prefs(c:android.content.Context)=c.getSharedPreferences("launcher_prefs",android.content.Context.MODE_PRIVATE)
+    fun remember(c:android.content.Context,u:android.net.Uri) {
+        if(android.media.tv.TvContract.isChannelUriForTunerInput(u)) prefs(c).edit().putString("last_tuner_uri",u.toString()).apply()
+    }
+    fun channel(c:android.content.Context):android.net.Uri? {
+        val manager=c.getSystemService(android.media.tv.TvInputManager::class.java)
+        val tuners=runCatching { manager?.tvInputList.orEmpty().filter { !it.isPassthroughInput && it.type==android.media.tv.TvInputInfo.TYPE_TUNER }.map { it.id }.toSet() }.getOrDefault(emptySet())
+        val resolver=c.contentResolver
+        val saved=prefs(c).getString("last_tuner_uri",null)?.let { android.net.Uri.parse(it) }?.takeIf { android.media.tv.TvContract.isChannelUriForTunerInput(it) }
+        fun valid(u:android.net.Uri):Boolean=runCatching { resolver.query(u,arrayOf("input_id","type"),null,null,null)?.use { it.moveToFirst() && it.getString(1)!="TYPE_PREVIEW" && (tuners.isEmpty() || it.getString(0) in tuners) }==true }.getOrDefault(false)
+        if(saved!=null && valid(saved)) return saved
+        // Only provider records with explicit tuner URI; ignore passthrough and arbitrary app intents.
+        var recent:android.net.Uri?=null; var stamp=0L
+        runCatching {
+            resolver.query(android.net.Uri.parse("content://android.media.tv/watch_next_program"),null,null,null,null)?.use { cur ->
+                fun v(n:String):String? { val i=cur.getColumnIndex(n); return if(i>=0 && !cur.isNull(i)) cur.getString(i) else null }
+                while(cur.moveToNext()) {
+                    if(v("package_name")!="com.tcl.tv" || v("watch_next_type")!="0") continue
+                    val t=v("last_engagement_time_utc_millis")?.toLongOrNull() ?: continue
+                    val u=runCatching { Intent.parseUri(v("intent_uri") ?: "",Intent.URI_INTENT_SCHEME).data }.getOrNull() ?: continue
+                    if(t>stamp && android.media.tv.TvContract.isChannelUriForTunerInput(u) && valid(u)) { recent=u; stamp=t }
+                }
+            }
+        }
+        if(recent!=null) return recent
+        for(id in tuners) runCatching {
+            resolver.query(android.media.tv.TvContract.buildChannelsUriForInput(id),arrayOf("_id","browsable","type"),null,null,null)?.use { cur ->
+                while(cur.moveToNext()) if(cur.getInt(1)==1 && cur.getString(2)!="TYPE_PREVIEW") return android.media.tv.TvContract.buildChannelUri(cur.getLong(0))
+            }
+        }
+        android.util.Log.i("HomeRedirectService","TUNER no accessible channel; inputs="+tuners.size)
+        return null
+    }
+    fun open(c:android.content.Context):Boolean {
+        val u=channel(c) ?: return false
+        val i=Intent(Intent.ACTION_VIEW,u).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val result=runCatching { c.startActivity(Intent(i).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")) }.recoverCatching { c.startActivity(Intent(i).setPackage("com.tcl.tv")) }
+        if(result.isSuccess) remember(c,u)
+        android.util.Log.i("HomeRedirectService","TUNER explicit channel accepted="+result.isSuccess)
+        return result.isSuccess
     }
 }
