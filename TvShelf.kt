@@ -334,7 +334,7 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                 if (ticket != generation || !active) bitmap?.recycle()
                 else {
                     onItem(item, bitmap)
-                    android.util.Log.i("TvShelf", "IMAGE pkg=$selectedPackage loaded=${bitmap!=null} scheme=${item.image?.scheme ?: "none"} host=${item.image?.host ?: "none"}")
+                    android.util.Log.i("TvShelf", "IMAGE pkg=$selectedPackage loaded=${bitmap!=null} size=${bitmap?.width ?: 0}x${bitmap?.height ?: 0} scheme=${item.image?.scheme ?: "none"} host=${item.image?.host ?: "none"}")
                     if(item.channelLogo) record("Kanal: "+item.title+if(bitmap!=null) "  LOGO: OK" else "  LOGO: —")
                     main.postDelayed({
                         if (ticket == generation && active) {
@@ -344,21 +344,40 @@ internal class TvShelf(private val context: Context, private val texture: Textur
                     }, if (bitmap != null) 5000L else 0L)
                     main.postDelayed({
                         if (ticket == generation && active && items.size > 1) next(1)
-                    }, if (item.video != null) 35000L else 9000L)
+                    }, if (item.video != null) 35000L else context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getInt("shelf_seconds",9).coerceIn(6,20)*1000L)
                 }
             }
         }
     }
 
-    private fun load(uri: Uri): Bitmap? = runCatching {
+    private fun artLimit():Int {
+        val pref=context.getSharedPreferences("launcher_prefs",Context.MODE_PRIVATE).getString("art_quality","auto")
+        return when(pref) { "fhd" -> 1920; "4k" -> 3840; else -> if((context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager).isLowRamDevice) 1920 else 3840 }
+    }
+
+    private fun load(uri: Uri): Bitmap? {
+        val limit=artLimit()
+        val high=if(limit>1920 && uri.scheme=="https") when(uri.host) {
+            "images.justwatch.com" -> uri.toString().replace("/s1440/","/s2160/").let { Uri.parse(it) }
+            "image.tmdb.org" -> Uri.parse(uri.toString().replace("/w1280/","/original/"))
+            "i.ytimg.com" -> if(uri.pathSegments.firstOrNull()=="vi" && uri.pathSegments.size>=3) Uri.parse("https://i.ytimg.com/vi/"+uri.pathSegments[1]+"/maxresdefault.jpg") else uri
+            else -> uri
+        } else uri
+        val first=loadBitmap(high,limit)
+        if(first!=null && (high==uri || first.width>=640)) return first
+        first?.recycle()
+        return if(high!=uri) loadBitmap(uri,limit) else null
+    }
+
+    private fun loadBitmap(uri: Uri,limit:Int): Bitmap? = runCatching {
         if(uri.scheme=="asset") {
             val path=uri.path?.removePrefix("/") ?: return@runCatching null
             if(!path.matches(Regex("channel_logos/[0-9]{4}\\.png"))) return@runCatching null
             return@runCatching context.assets.open(path).use { BitmapFactory.decodeStream(it) }
         }
-        val cacheDir=java.io.File(context.cacheDir,"shelf-images").apply { mkdirs() }
+        val cacheDir=java.io.File(context.cacheDir,"shelf-images-v2").apply { mkdirs() }
         val remote=uri.scheme=="https"
-        val cache=if(remote) java.io.File(cacheDir,java.security.MessageDigest.getInstance("SHA-256").digest(uri.toString().toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }+".img") else null
+        val cache=if(remote) java.io.File(cacheDir,java.security.MessageDigest.getInstance("SHA-256").digest((limit.toString()+":"+uri.toString()).toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }+".img") else null
         if(cache!=null && cache.isFile && System.currentTimeMillis()-cache.lastModified() in 0..604800000L) {
             BitmapFactory.decodeFile(cache.absolutePath)?.let { return@runCatching it }
         }
@@ -381,13 +400,15 @@ internal class TvShelf(private val context: Context, private val texture: Textur
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
         var sample = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2160) sample *= 2
-        val bitmap=BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > limit*2 || (bounds.outWidth.toLong()/sample)*(bounds.outHeight.toLong()/sample)>9_000_000L) sample *= 2
+        val decoded=BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return@runCatching null
+        val longest=maxOf(decoded.width,decoded.height)
+        val bitmap=if(longest>limit) Bitmap.createScaledBitmap(decoded,maxOf(1,decoded.width*limit/longest),maxOf(1,decoded.height*limit/longest),true).also { if(it!==decoded) decoded.recycle() } else decoded
         if(bitmap!=null && cache!=null) runCatching {
-            cache.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG,100,it) }
+            cache.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG,94,it) }
             val entries=cacheDir.listFiles().orEmpty().sortedBy { it.lastModified() }
             var total=entries.sumOf { it.length() }
-            for(file in entries) { if(total<=64L*1024*1024) break; val size=file.length(); if(file.delete()) total-=size }
+            for(file in entries) { if(total<=128L*1024*1024) break; val size=file.length(); if(file.delete()) total-=size }
         }
         bitmap
     }.getOrNull()
