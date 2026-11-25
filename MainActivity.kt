@@ -979,12 +979,12 @@ class MainActivity : Activity() {
             setPadding(0,dp(7),0,dp(2))
         }
         holder.addView(label, LinearLayout.LayoutParams(-1,-2))
-        holder.setOnClickListener { if(movingId != null) finishMove(true) else { holder.animate().cancel(); holder.scaleX=1.04f; holder.scaleY=1.04f; holder.animate().scaleX(if(holder.hasFocus())1.10f else 1f).scaleY(if(holder.hasFocus())1.10f else 1f).setDuration(150).start(); launch(tile) } }
+        holder.setOnClickListener { if(movingId != null) finishMove(true) else launch(tile) }
         holder.setOnLongClickListener { if(movingId == null) edit(tile); true }
         holder.setOnFocusChangeListener { view, focus ->
             val lifted=if(movingId!=null) movingId==tile.id else focus
             val scale=if(lifted) (if(movingId!=null) 1.07f else 1.10f) else 1f
-            view.animate().cancel(); view.animate().scaleX(scale).scaleY(scale).setInterpolator(android.view.animation.DecelerateInterpolator(1.8f)).setDuration(190).start()
+            view.animate().cancel(); view.animate().scaleX(scale).scaleY(scale).setInterpolator(android.view.animation.PathInterpolator(0.2f,0f,0.2f,1f)).setDuration(if(lifted) 230L else 170L).start()
             view.translationZ = if(lifted) dp(10).toFloat() else 0f
             panel.elevation = if(lifted) dp(8).toFloat() else dp(3).toFloat()
             border.background = focusBorder(lifted)
@@ -1008,11 +1008,11 @@ class MainActivity : Activity() {
         val image=backdropImage.drawable ?: return
         val iw=image.intrinsicWidth.toFloat(); val ih=image.intrinsicHeight.toFloat()
         if(iw<=0 || ih<=0) return
-        // Prime artwork must fit below the header without cropping its embedded labels.
-        val factor=if(prime) minOf(w/iw,(h-top)/ih) else maxOf(w/iw,h/ih)
+        // Prime fills the full width below the header; crop vertically rather than leaving a side gap.
+        val factor=if(prime) maxOf(w/iw,(h-top)/ih) else maxOf(w/iw,h/ih)
         backdropImage.imageMatrix=Matrix().apply {
             setScale(factor,factor)
-            postTranslate(if(prime) w-iw*factor else (w-iw*factor)/2,if(prime) top+(h-top-ih*factor)/2 else (h-ih*factor)/2)
+            postTranslate((w-iw*factor)/2,if(prime) top.toFloat() else (h-ih*factor)/2)
         }
         if(::glassSource.isInitialized) glassSource.invalidate()
     }
@@ -1124,8 +1124,10 @@ class MainActivity : Activity() {
 
     private fun launchShelfItem(tile: Tile) {
         val link=shelfPlayer.currentLink(tile.id)
-        if(tile.id=="com.tcl.tv" && link!=null && android.media.tv.TvContract.isChannelUriForTunerInput(link)) {
-            if(runCatching { startActivity(Intent(Intent.ACTION_VIEW,link).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")); true }.getOrDefault(false)) { LiveTuner.remember(this,link); rememberOpened(tile); return }
+        if(tile.id=="com.tcl.tv") { launch(tile); return }
+        if(tile.id in setOf("com.beonetv.tod","com.digiturk.tod","com.digiturk.tod.mobil","com.todtv.tod","com.digiturk.iq.mobil")) {
+            // This installed TV app advertises MAIN only; do not send unsupported web links.
+            launch(tile); return
         }
         val netflix=tile.id in setOf("com.netflix.ninja","com.netflix.mediaclient")
         val candidates=mutableListOf<Intent>()
