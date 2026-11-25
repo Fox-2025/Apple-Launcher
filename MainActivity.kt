@@ -1301,7 +1301,7 @@ class MainActivity : Activity() {
         val helper=runCatching {
             getSystemService(android.view.accessibility.AccessibilityManager::class.java)
                 ?.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-                ?.any { it.resolveInfo.serviceInfo.packageName==packageName }==true
+                ?.any { it.resolveInfo.serviceInfo.packageName==packageName && it.resolveInfo.serviceInfo.name==HomeRedirectService::class.java.name }==true
         }.getOrDefault(false)
         val status=if(isDefault) "TVOS Launcher" else resolved.ifBlank { "—" }
         glassMenu(t("Ana ekran","Home screen"),arrayOf(
@@ -1311,7 +1311,8 @@ class MainActivity : Activity() {
             t("Yardımcı: ","Helper: ")+when { HomeRedirectService.connected -> t("bağlı","connected"); helper -> t("etkin, bağlantı yok","enabled, not connected"); else -> t("kapalı","disabled") },
             t("Erişilebilirlik / ADB kurulum rehberi","Accessibility / ADB setup guide"),
             "Android "+android.os.Build.VERSION.RELEASE+" • SDK "+android.os.Build.VERSION.SDK_INT,
-            t("Home dönüş odağı","Home return focus")),
+            t("Home dönüş odağı","Home return focus"),
+            t("Kanal logosu: ","Channel logo: ")+if(ChannelLogoService.connected) t("bağlı","connected") else t("kapalı","disabled")),
             onBack={showSettings()}) { choice ->
             when(choice) {
                 2 -> {
@@ -1329,6 +1330,10 @@ class MainActivity : Activity() {
                 4 -> {
                     accessibilitySettingsGuide()
                 }
+                7 -> android.app.AlertDialog.Builder(this).setTitle(t("Kanal logosu","Channel logo"))
+                    .setMessage(t("İsteğe bağlı servis yalnızca TCL Canlı TV kanal adını ve numarasını okur. Bilgi cihazda tutulur. Etkinleştirmek için erişilebilirlik ayarlarında TVOS — Kanal logosu servisini açın. Home servisini açık bırakın.","Optional service reads only the TCL Live TV channel name and number. Data stays on device. Enable TVOS — Channel logo in Accessibility settings; keep the Home service enabled."))
+                    .setPositiveButton(t("Ayarları aç","Open settings")) { _,_ -> openSystemSettings(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS) }
+                    .setNegativeButton(t("İptal","Cancel"),null).show()
                 6 -> glassMenu(t("Home dönüş odağı","Home return focus"),arrayOf(t("İlk kart","First card"),t("Son açılan uygulama","Last opened app"),t("Son odaklanan kart","Last focused card")),onBack={homeSettings()}) { n -> prefs.edit().putString("return_focus",listOf("first","opened","last")[n]).apply(); homeSettings() }
                 else -> homeSettings()
             }
