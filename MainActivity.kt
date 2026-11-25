@@ -1008,10 +1008,41 @@ class MainActivity : Activity() {
     }
 
     private fun launchShelfItem(tile: Tile) {
-        val link=shelfPlayer.currentLink()
-        if(link!=null && tile.id in setOf("com.netflix.ninja","com.netflix.mediaclient")) {
-            if(runCatching { startActivity(Intent(Intent.ACTION_VIEW,link).setPackage(tile.id)) }.isSuccess) return
+        val link=shelfPlayer.currentLink(tile.id)
+        val netflix=tile.id in setOf("com.netflix.ninja","com.netflix.mediaclient")
+        val candidates=mutableListOf<Intent>()
+        if(link!=null) {
+            if(netflix && link.scheme=="https" && link.host in setOf("netflix.com","www.netflix.com")) {
+                val parts=link.pathSegments
+                val id=parts.zipWithNext().firstOrNull { (kind,value) -> kind in setOf("title","watch") && value.matches(Regex("[0-9]+")) }?.second
+                if(id!=null) {
+                    for(scheme in listOf("https","nflx")) {
+                        candidates.add(Intent(Intent.ACTION_VIEW,android.net.Uri.parse("$scheme://www.netflix.com/title/$id"))
+                            .putExtra("source","30").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+                    }
+                }
+            }
+            runCatching {
+                val parsed=Intent.parseUri(link.toString(),Intent.URI_INTENT_SCHEME or Intent.URI_ANDROID_APP_SCHEME)
+                if(parsed.component?.packageName?.let { it!=tile.id }!=true &&
+                    parsed.`package`?.let { it!=tile.id }!=true) {
+                    parsed.selector=null
+                    parsed.clipData=null
+                    parsed.flags=0
+                    if(netflix) parsed.putExtra("source","30")
+                    candidates.add(parsed)
+                }
+            }
         }
+        for(candidate in candidates) {
+            candidate.setPackage(tile.id)
+            val result=runCatching { startActivity(candidate) }
+            android.util.Log.i("TvShelf","OPEN pkg="+tile.id+" scheme="+(candidate.data?.scheme ?: "none")+" accepted="+result.isSuccess+
+                (result.exceptionOrNull()?.let { " error="+it.javaClass.simpleName } ?: ""))
+            if(result.isSuccess) return
+        }
+        android.util.Log.i("TvShelf","OPEN pkg="+tile.id+" fallback=app link="+(link!=null))
+        Toast.makeText(this,t("İçerik bağlantısı açılamadı; uygulama açılıyor.","Title link unavailable; opening app."),Toast.LENGTH_SHORT).show()
         launch(tile)
     }
 
