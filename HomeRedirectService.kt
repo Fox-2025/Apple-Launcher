@@ -225,17 +225,15 @@ internal object LiveTuner {
         return null
     }
     fun open(c:android.content.Context,fast:Boolean=false,onPower:Boolean=false):Boolean {
-        val cached=if(fast) prefs(c).getString("last_tuner_uri",null)?.let { android.net.Uri.parse(it) }?.takeIf { android.media.tv.TvContract.isChannelUriForTunerInput(it) } else null
-        val u=cached ?: channel(c) ?: return false
-        android.util.Log.i("HomeRedirectService","TUNER cached="+(cached!=null)+" uptime="+SystemClock.elapsedRealtime())
-        val i=Intent(Intent.ACTION_VIEW,u).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val explicit=Intent(i).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")
-        val result=runCatching {
-            if(onPower) explicit.putExtra("com.google.android.leanbacklauncher.extra.TV_APP_ON_BOOT",true)
-            c.startActivity(explicit)
-        }.recoverCatching { c.startActivity(Intent(i).setClassName("com.tcl.tv","com.tcl.tv.TVActivity")) }.recoverCatching { c.startActivity(Intent(i).setPackage("com.tcl.tv")) }
-        if(result.isSuccess) remember(c,u)
-        android.util.Log.i("HomeRedirectService","TUNER explicit channel accepted="+result.isSuccess+" onPower="+onPower)
+        // The TCL activity restores its own last channel. Never override it with a stale URI.
+        val explicit=Intent(Intent.ACTION_MAIN)
+            .setClassName("com.tcl.tv","com.tcl.tv.TVActivity")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        explicit.putExtra("com.google.android.leanbacklauncher.extra.TV_APP_ON_BOOT",true)
+        val result=runCatching { c.startActivity(explicit) }.recoverCatching {
+            c.startActivity(Intent(explicit).setAction(Intent.ACTION_VIEW))
+        }
+        android.util.Log.i("HomeRedirectService","TUNER native resume accepted="+result.isSuccess+" onPower="+onPower+" uptime="+SystemClock.elapsedRealtime())
         return result.isSuccess
     }
 }
