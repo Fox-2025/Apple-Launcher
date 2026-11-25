@@ -1,0 +1,36 @@
+name: Publish v2.2 beta APK
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v22-beta.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: v2.2.0-beta.1
+    steps:
+      - name: Download verified APK
+        run: |
+          gh run download 45624837328 --name app-debug --dir dist
+          test -s dist/app-debug.apk
+          mv dist/app-debug.apk dist/Apple-Launcher-v2.2.0-beta.1.apk
+      - name: Publish prerelease
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release already exists; not overwriting."
+            exit 0
+          fi
+          gh release create "$TAG" dist/Apple-Launcher-v2.2.0-beta.1.apk \
+            --target 2392aaf118beaab31b877b86f771a5e3ee587b71 \
+            --title "Apple Launcher v2.2.0-beta.1 - Turkish Glass Edition" \
+            --prerelease \
+            --notes "Turkish default, optional English, localized common TV application names, custom application renaming, glass settings and edit menus. Android 9+. Debug-signed APK from successful run 45624837328. Runtime testing pending. An existing beta may need uninstalling if debug signing keys differ."
