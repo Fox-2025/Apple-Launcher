@@ -30,13 +30,13 @@ jobs:
           mkdir -p probe-build/classes probe-build/dex
           cat > probe-build/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="com.tvos.channelprobe" android:versionCode="1" android:versionName="1.0">
+              package="com.tvos.channelprobe.v2" android:versionCode="2" android:versionName="2.0">
               <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="30"/>
               <uses-feature android:name="android.software.leanback" android:required="false"/>
               <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
               <uses-permission android:name="android.permission.READ_TV_LISTINGS"/>
               <queries><package android:name="com.tcl.tv"/></queries>
-              <application android:label="TCL Kanal Testi" android:debuggable="true"
+              <application android:label="TCL Kanal Testi v2" android:debuggable="true"
                   android:allowBackup="false" android:theme="@android:style/Theme.Material.NoActionBar">
                   <uses-library android:name="com.tcl.tvmanager" android:required="false"/>
                   <uses-library android:name="com.tcl.deviceinfo" android:required="false"/>
@@ -59,11 +59,11 @@ jobs:
           (cd probe-build/dex && zip -j ../unsigned.apk classes.dex)
           "$bt/zipalign" -f 4 probe-build/unsigned.apk probe-build/aligned.apk
           keytool -genkeypair -keystore probe-build/debug.jks -storepass android -keypass android -alias androiddebugkey -dname "CN=TCL Channel Probe" -keyalg RSA -keysize 2048 -validity 10000
-          "$bt/apksigner" sign --ks probe-build/debug.jks --ks-pass pass:android --key-pass pass:android --out probe-build/tcl-channel-probe.apk probe-build/aligned.apk
-          "$bt/apksigner" verify --verbose probe-build/tcl-channel-probe.apk
-          "$bt/aapt2" dump badging probe-build/tcl-channel-probe.apk
+          "$bt/apksigner" sign --ks probe-build/debug.jks --ks-pass pass:android --key-pass pass:android --out probe-build/tcl-channel-probe-v2.apk probe-build/aligned.apk
+          "$bt/apksigner" verify --verbose probe-build/tcl-channel-probe-v2.apk
+          "$bt/aapt2" dump badging probe-build/tcl-channel-probe-v2.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: tcl-channel-probe
-          path: probe-build/tcl-channel-probe.apk
+          name: tcl-channel-probe-v2
+          path: probe-build/tcl-channel-probe-v2.apk
           if-no-files-found: error
