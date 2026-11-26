@@ -1,4 +1,4 @@
-package com.tvos.channelprobe;
+package com.tvos.channelprobe.v2;
 
 import android.app.Activity;
 import android.os.Bundle;
@@ -40,7 +40,7 @@ public final class MainActivity extends Activity {
         layout.setPadding(36,28,36,28);
         layout.setBackgroundColor(Color.rgb(20,25,34));
         TextView title = new TextView(this);
-        title.setText("TCL Kanal Testi - Salt Okuma");
+        title.setText("TCL Kanal Testi v2 - Salt Okuma");
         title.setTextColor(Color.WHITE);
         title.setTextSize(26);
         layout.addView(title);
@@ -48,9 +48,9 @@ public final class MainActivity extends Activity {
         status.setTextColor(Color.WHITE);
         status.setTextSize(17);
         status.setText("Test secin. Kanal ayarlari degistirilmez.");
-        String[] names = {"1. Kanal arama (ATV / KOZA / TRT)", "2. Su anki kanal", "3. Kanal listesi"};
-        String[] keys = {"search","current","list"};
-        buttons = new Button[3];
+        String[] names = {"1. Kanal arama (ATV / KOZA / TRT)", "2. Su anki kanal", "3. Kanal listesi", "4. Ham kanal kayitlari (DVB-S)"};
+        String[] keys = {"search","current","list","raw"};
+        buttons = new Button[keys.length];
         for (int i=0; i<keys.length; i++) {
             final String key=keys[i];
             Button button=new Button(this);
@@ -65,7 +65,7 @@ public final class MainActivity extends Activity {
         setContentView(layout);
         buttons[0].requestFocus();
         String test=getIntent().getStringExtra("test");
-        if ("search".equals(test)||"current".equals(test)||"list".equals(test)) startTest(test);
+        if ("search".equals(test)||"current".equals(test)||"list".equals(test)||"raw".equals(test)) startTest(test);
     }
 
     private void save(String test, JSONObject data) throws Exception {
@@ -99,7 +99,8 @@ public final class MainActivity extends Activity {
                 Log.i(TAG,"START "+test);
                 if ("search".equals(test)) search(report);
                 else if ("current".equals(test)) current(report);
-                else list(report);
+                else if ("list".equals(test)) list(report);
+                else raw(report);
                 report.put("status","completed");
             } catch (Throwable t) {
                 try {report.put("status","error");report.put("error",error(t));} catch(Exception ignored){}
@@ -206,5 +207,95 @@ public final class MainActivity extends Activity {
             // Preserve first result if the next OEM method crashes.
             save("list",report);
         }
+    }
+
+    private static Object call0(Object receiver,String name) throws Exception {
+        return receiver.getClass().getMethod(name).invoke(receiver);
+    }
+    private JSONObject publicFields(Object item) throws Exception {
+        JSONObject row=new JSONObject();
+        if(item==null){row.put("null",true);return row;}
+        for(Field f:item.getClass().getFields()){
+            if(java.lang.reflect.Modifier.isStatic(f.getModifiers()))continue;
+            Class<?> t=f.getType();
+            if(!(t.isPrimitive()||t==String.class||t.isEnum()))continue;
+            Object val=f.get(item);
+            row.put(f.getName(),val==null?JSONObject.NULL:(val instanceof Enum?((Enum<?>)val).name():val));
+        }
+        return row;
+    }
+    private void saveBytes(String name,byte[] bytes) throws Exception {
+        AtomicFile file=new AtomicFile(new File(getFilesDir(),name));
+        FileOutputStream out=file.startWrite();
+        try{out.write(bytes);file.finishWrite(out);}
+        catch(Throwable t){file.failWrite(out);throw t;}
+    }
+    @SuppressWarnings({"unchecked","rawtypes"})
+    private void raw(JSONObject report) throws Exception {
+        Class<?> apiClass=Class.forName("com.tcl.tosapi.common.TvChannelApi");
+        Object api=apiClass.getMethod("getInstance").invoke(null);
+        Class type=Class.forName("com.tcl.tvmanager.vo.EnTCLDtvType");
+        JSONArray attempts=new JSONArray();
+        report.put("attempts",attempts);
+        report.put("recordLength",call0(api,"getChannelInfoLength"));
+        report.put("currentNative",publicFields(call0(api,"getCurrentProgramInfo")));
+        save("raw",report);
+        int length=((Number)call0(api,"getChannelInfoLength")).intValue();
+        for(String name:new String[]{"EN_TCL_ALL","EN_TCL_DVBS"}){
+            JSONObject a=new JSONObject();a.put("tuner",name);attempts.put(a);
+            int tuner=Enum.valueOf(type,name).ordinal();
+            a.put("tunerOrdinal",tuner);a.put("status","started");
+            save("raw",report);
+            Log.i(TAG,"RAW START "+name);
+            try{
+                byte[] bytes=(byte[])apiClass.getMethod("getChannelListData",int.class).invoke(api,tuner);
+                a.put("bytes",bytes==null?0:bytes.length);
+                if(bytes==null||bytes.length==0){a.put("status","empty");continue;}
+                if(bytes.length>32*1024*1024){a.put("status","oversize");continue;}
+                String fn=name.equals("EN_TCL_ALL")?"raw_all.bin":"raw_dvbs.bin";
+                saveBytes(fn,bytes);a.put("snapshotFile",fn);
+                if(length<=0||bytes.length%length!=0){a.put("status","unexpected_record_size");continue;}
+                if(bytes.length/length>20000){a.put("status","too_many_records");continue;}
+                List<Object> items=new java.util.ArrayList<>();
+                apiClass.getMethod("getChannelListByData",byte[].class,List.class).invoke(api,bytes,items);
+                JSONArray rows=new JSONArray();
+                a.put("channels",rows);
+                a.put("count",items.size());
+                for(Object item:items)rows.put(publicFields(item));
+                a.put("status",items.isEmpty()?"empty_decoded":"ok");
+            }catch(Throwable t){a.put("status","error");a.put("error",error(t));}
+            finally{save("raw",report);Log.i(TAG,"RAW END "+name+" "+a.optString("status"));}
+        }
+        // Public read-only TChannelManager query; exact DVB-S filter used by OEM TvInput.
+        JSONObject query=new JSONObject();report.put("serviceQuery",query);save("raw",report);
+        try{
+            Object tm=Class.forName("tvos.tv.TManager").getMethod("getInstance",android.content.Context.class).invoke(null,getApplicationContext());
+            Object cm=call0(tm,"getChannelManager");
+            int tuner=Enum.valueOf(type,"EN_TCL_DVBS").ordinal();
+            String selection="delivery_type="+tuner;
+            query.put("selection",selection);
+            Object iterator=cm.getClass().getMethod("queryTVServices",String.class,String[].class,String.class).invoke(cm,selection,null,null);
+            if(iterator==null){query.put("status","null_iterator");return;}
+            Class<?> it=Class.forName("tvos.tv.channel.utils.TListIterator");
+            query.put("count",it.getMethod("getCount").invoke(iterator));
+            JSONArray rows=new JSONArray();query.put("channels",rows);
+            while(rows.length()<20000 && Boolean.TRUE.equals(it.getMethod("hasNext").invoke(iterator))){
+                Object service=it.getMethod("next").invoke(iterator);
+                if(service==null)continue;
+                JSONObject row=new JSONObject();
+                for(String getter:new String[]{"getKey","getChannelId","getNumber","getName","getServiceID","getTransportStreamID","getOnID","getServiceType","isFavorite","isHD","isDeleted","isSkipped","isLocked","isScrambled"}){
+                    Object val=call0(service,getter);
+                    row.put(getter,val==null?JSONObject.NULL:(val instanceof Enum?((Enum<?>)val).name():val));
+                }
+                Object tp=call0(service,"getTransponder");
+                if(tp!=null){
+                    row.put("frequency",call0(tp,"getFrquency"));
+                    row.put("symbolRate",call0(tp,"getSymbolRate"));
+                    row.put("deliveryType",String.valueOf(call0(tp,"getDeliveryType")));
+                }
+                rows.put(row);
+            }
+            query.put("status",rows.length()>0?"ok":"empty");
+        }catch(Throwable t){query.put("status","error");query.put("error",error(t));}
     }
 }
